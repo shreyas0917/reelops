@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import argparse
 import logging
+import signal
 import sys
+import threading
 from pathlib import Path
 
 from . import PipelineError
@@ -28,10 +30,17 @@ def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["consume"]:
         _setup_logging(verbose="-v" in argv[1:])
+        # Catch SIGTERM before the slow imports and model load. As PID 1 in a
+        # container, a signal with no handler is dropped by the kernel, so an
+        # early stop would be lost and end in SIGKILL after the grace period.
+        stop = threading.Event()
+        signal.signal(signal.SIGTERM, lambda signum, frame: stop.set())
+        signal.signal(signal.SIGINT, lambda signum, frame: stop.set())
+        log.info("consumer starting")
         from .consumer import main as consume
 
         try:
-            return consume()
+            return consume(stop)
         except ValueError as exc:  # missing/invalid settings
             log.error("%s", exc)
             return 2

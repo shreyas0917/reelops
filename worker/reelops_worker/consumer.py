@@ -139,7 +139,10 @@ class Heartbeat:
 
 
 class Consumer:
-    def __init__(self, settings: Settings, *, sqs, s3, table, polly=None, model=None, worker_id=None, clock=time.time):
+    def __init__(
+        self, settings: Settings, *, sqs, s3, table, polly=None, model=None, worker_id=None, clock=time.time,
+        stopping: threading.Event | None = None,
+    ):  # fmt: skip
         settings.require_consumer()
         self.settings = settings
         self.sqs = sqs
@@ -149,7 +152,8 @@ class Consumer:
         self.model = model
         self.clock = clock
         self.worker_id = worker_id or f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:6]}"
-        self.stopping = threading.Event()
+        # May already be set: a stop requested during startup is not lost.
+        self.stopping = stopping or threading.Event()
         self._busy = False
         self._signals = False
 
@@ -179,6 +183,9 @@ class Consumer:
         raise Shutdown()
 
     def run_forever(self) -> None:
+        if self.stopping.is_set():
+            log.info("stop requested during startup; not polling")
+            return
         log.info("worker %s polling %s", self.worker_id, self.settings.jobs_queue_url)
         while not self.stopping.is_set():
             try:
@@ -401,12 +408,20 @@ class Consumer:
         )
 
 
-def main() -> int:
-    """Entry point for consumer mode: load the model once, then poll forever."""
+def main(stop: threading.Event | None = None) -> int:
+    """Entry point for consumer mode: load the model once, then poll forever.
+
+    `stop` is set by the early SIGTERM handler in __main__, so a stop requested
+    during startup is honoured instead of lost.
+    """
+    stop = stop or threading.Event()
     settings = Settings.from_env()
     settings.require_consumer()
     region = settings.aws_region
 
+    if stop.is_set():
+        log.info("stop requested during startup; exiting before loading the model")
+        return 0
     started = time.perf_counter()
     model = load_model(settings)
     log.info("Whisper model %s loaded in %.1fs", settings.whisper_model, time.perf_counter() - started)
@@ -418,6 +433,7 @@ def main() -> int:
         table=boto3.resource("dynamodb", region_name=region).Table(settings.jobs_table),
         polly=boto3.client("polly", region_name=region),
         model=model,
+        stopping=stop,
     )
     consumer.install_signal_handlers()
     consumer.run_forever()

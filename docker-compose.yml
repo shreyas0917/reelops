@@ -30,6 +30,10 @@ services:
     image: reelops-worker:dev
     command: ["consume"]
     env_file: .env
+    # tini as PID 1: forwards SIGTERM to Python (which, not being PID 1, then
+    # dies by default even before its handler exists) and reaps orphaned ffmpeg
+    # processes. ECS equivalent: linuxParameters.initProcessEnabled (Phase 4).
+    init: true
     # Like ECS: SIGTERM, then SIGKILL after 30 s (default stopTimeout). Longer
     # than the worker's 20 s job grace period, so it can hand a job back first.
     stop_grace_period: 30s
