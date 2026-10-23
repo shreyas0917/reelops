@@ -2034,3 +2034,335 @@ not reproducible and tied to a temporary ALB name).
 2. *What should never be committed from a frontend project?* `node_modules/`,
    build output (`dist/`), test artefacts and reports, local env files; do
    commit the lock file so installs are reproducible.
+
+---
+
+## Phase 7 — CI/CD with GitHub Actions
+
+### Step 1 — GitHub OIDC and CI roles
+
+**Built:** `terraform/main/github_oidc.tf`: the GitHub OIDC provider (no
+thumbprint pin; AWS validates GitHub via trusted CAs), `var.github_repo`, and
+two roles. `reelops-gha-plan`: trust `aud = sts.amazonaws.com` and `sub` =
+`repo:shreyas0917/reelops:pull_request` or `…:ref:refs/heads/*`;
+ReadOnlyAccess + read/write on `reelops/main.tfstate.tflock` (and read on the
+state). `reelops-gha-deploy`: trust only
+`sub = repo:shreyas0917/reelops:environment:production`; ReadOnlyAccess +
+scoped writes for this project's services, plus explicit denies. Plan: 7 to
+add (not applied yet). IAM simulator on the rendered policies: 35/35.
+
+**Why / alternatives:**
+- *OIDC:* GitHub signs a short-lived JWT per job; AWS verifies the signature
+  and the trust policy's `aud`/`sub` and returns ~1-hour credentials. No keys
+  are stored anywhere, and tokens from other repos/branches/environments fail
+  the `sub` check. Alternative: IAM user access keys in GitHub secrets
+  (long-lived, leakable, need rotation).
+- *Plan needs the lock:* with `use_lockfile`, plan writes and deletes
+  `main.tfstate.tflock` to read a consistent state while no apply runs;
+  `-lock=false` would let a concurrent apply change state under the plan.
+- *Environment-scoped deploy trust:* only a job in the `production`
+  environment (protected by a required reviewer) gets a `sub` that matches.
+- *Unavoidable wildcards:* `ecr:GetAuthorizationToken` (no resource),
+  `ecs:Register/DeregisterTaskDefinition` (no resource-level support),
+  EC2 networking and Application Auto Scaling (resources are generated IDs);
+  all limited to ap-south-1, EC2 to an explicit networking action list.
+- *Guardrails (explicit Deny):* no IAM users/keys/login profiles; no changes
+  to `reelops-gha-*` roles or the OIDC provider (CI can't widen its own
+  access; such changes are applied locally); no reconfiguring/deleting the
+  state bucket or deleting state versions.
+- *ReadOnlyAccess trade-off:* broad, including data reads (all S3 objects,
+  DynamoDB items); ViewOnlyAccess + a hand-kept read list is tighter but breaks
+  refresh whenever a new resource type appears.
+
+**Problems / residual risks (documented, not solved):**
+1. EC2 networking writes are region-wide, so they could in principle touch the
+   hand-made dev box's VPC/SG; tag conditions break on untagged calls
+   (routes, rule authorisations).
+2. The deploy role can edit inline policies on `reelops-dev-*` roles and run
+   tasks with them (an escalation path). Next hardening step: a permissions
+   boundary required on `reelops-dev-*` roles. Mitigation now: every deploy
+   requires the owner's approval after seeing the plan.
+
+**Interview questions:**
+1. *How does GitHub Actions get AWS credentials without stored secrets?* The
+   job requests an OIDC token (`id-token: write`); `aws-actions/configure-aws-
+   credentials` calls `AssumeRoleWithWebIdentity`; IAM trusts the GitHub
+   provider and checks `aud` and `sub` (repo, branch, PR or environment) before
+   issuing temporary credentials.
+2. *How do you stop a CI role from escalating its own privileges?* Explicitly
+   deny changes to its own role, trust policy and identity provider, deny IAM
+   user/key creation, restrict `iam:PassRole` by service, and require a
+   permissions boundary on any role it can create or edit; gate it behind a
+   protected environment with a human reviewer.
+
+### Step 2 — Fix image CVEs before gating on them
+
+**Built:** Trivy 0.75.0 (pinned digest) scanning exported image tarballs
+(`docker save` + `--input`, no Docker socket mount). Baseline: worker 2
+CRITICAL (libbrotli1 CVE-2026-111497, libxml2 CVE-2026-6653) + 207 HIGH;
+API 0 CRITICAL + 44 HIGH. A candidate with the newest base digest and
+`apt-get upgrade` still had both: Debian 13 has no fixed packages yet (and the
+pinned digest already was the newest). Mitigation shipped in the worker: user
+uploads are opened with ffmpeg `-format_whitelist
+mov,mp4,m4a,3gp,3g2,mj2,matroska,webm` (probe, audio extraction, render).
+`.trivyignore.yaml` accepts the two CVEs with statements and
+`expired_at: 2026-11-22`. Gate (`--severity CRITICAL --exit-code 1`): both
+images pass with the ignore file, the worker fails without it, and fails again
+once the entries expire. Worker tests: 73.
+
+**Why / alternatives:**
+- *Exploitability, not just presence:* libxml2 was reachable: ffmpeg picks
+  demuxers by content, so a DASH manifest named `.mp4` reached the DASH
+  demuxer and libxml2 (demonstrated). The whitelist blocks it before parsing.
+  brotli is only used by FreeType for WOFF2 fonts via libass, and libass only
+  loads the installed DejaVu TTFs.
+- *No `apt-get upgrade` in the Dockerfile:* it fixed nothing and makes builds
+  unreproducible; base updates should come as pinned-digest bumps through CI.
+- *Per-CVE entries with expiry, not `--ignore-unfixed`:* the flag would hide
+  every future unfixed CRITICAL with no review or record.
+- *Alternative not taken (yet):* a static ffmpeg build would drop most of these
+  libraries (and ~250 MB), but scanners can't see statically linked libraries,
+  so it hides findings as much as it fixes them.
+
+**Problems:** My first ignore file put a `paths:` filter on the libxml2 entry;
+OS-package findings have no `PkgPath`, so the entry silently never matched and
+the gate still failed. Removed the filter and documented why. ECR's basic scan
+and Trivy disagreed on which packages were CRITICAL (tiff vs libxml2):
+different data sources; CI gates on Trivy.
+
+**Interview questions:**
+1. *A critical CVE has no fix yet. What do you do?* Confirm there's no fixed
+   package or newer base; assess reachability in your app; add a mitigation
+   that cuts the path (here ffmpeg's format whitelist); then accept it
+   explicitly with a written justification and an expiry so it gets
+   re-reviewed, rather than blanket-ignoring unfixed CVEs.
+2. *Why scan an exported image instead of mounting the Docker socket into the
+   scanner?* The socket gives the container root-equivalent control of the
+   host's Docker daemon; scanning a `docker save` tarball needs no such access.
+
+### Step 3 — CI workflow
+
+**Built:** `.github/workflows/ci.yml` (pull_request + push to main +
+manual): jobs `lint` (ruff 0.17.0, hadolint), `terraform` (fmt -check,
+`init -backend=false` + validate for bootstrap and main, Terraform 1.17.0),
+`secrets` (gitleaks over full history), `frontend` (Node 24.22.1, npm ci, tsc,
+Vitest), `api` and `worker` (build the test target, run tests with
+`--network none`, build the production image from the same cache, Trivy gate
+on CRITICAL). GHA layer cache per image; `permissions: {}` at the top and
+`contents: read` per job; `persist-credentials: false`; PR runs cancel
+superseded runs; pinned `ubuntu-24.04` runners and job timeouts. Added
+`ruff.toml` and `.hadolint.yaml`. Verified before pushing: actionlint (with
+shellcheck) clean, every `uses:` pinned to a 40-char SHA with a version
+comment, and every check run locally with the same pinned tools.
+
+**Why / alternatives:**
+- *SHA pins:* a tag can be moved to new code by whoever controls the action
+  (the 2025 tj-actions/changed-files compromise spread through tag refs); a
+  commit SHA can't. Dependabot (Step 6) proposes SHA bumps with the version.
+- *Tools as pinned images, not marketplace actions* (Trivy, hadolint,
+  gitleaks): fewer third parties to trust, identical locally and in CI.
+- *Test + production build + scan in one job per image:* the production build
+  reuses the test build's layers; separate jobs would rebuild or re-download
+  the worker's ~1 GB of dependency layers.
+- *Playwright skipped in CI:* the 3.6 GB browser image and screenshot review
+  are better run locally or nightly; Vitest + tsc gate the frontend.
+
+**Problems (found by running everything locally first):**
+- ruff: `zip()` without `strict=` in captions/voiceover (now `strict=True`, so
+  a length mismatch fails loudly instead of truncating the voice-over; the
+  test that pairs consecutive captions uses an explicit `strict=False`) and two
+  long lines.
+- hadolint: `USER app` → `USER 10001:10001` (numeric, so platforms like
+  Kubernetes `runAsNonRoot` can verify it); DL3008 (apt version pins) ignored
+  with a written reason: Debian replaces versions on security updates, so pins
+  break builds exactly when a fix ships.
+- My mistakes: a wrong actionlint flag (`-color=never` → `-no-color`), and a
+  `gitleaks dir` call with several paths that scanned the container's whole
+  filesystem (its "no leaks" result was meaningless; CI's history scan is the
+  real check, and it found none in 46 commits).
+
+**Interview questions:**
+1. *Why pin GitHub Actions to commit SHAs?* Tags and branches are mutable; if
+   an action's repo is compromised, a tag can point at malicious code and every
+   workflow using the tag runs it. A SHA is immutable; use Dependabot to update
+   pins with reviewable diffs.
+2. *How do you give CI jobs least privilege?* `permissions: {}` at workflow
+   level and grant each job only what it uses (`contents: read`, `id-token:
+   write` only where OIDC is needed, `pull-requests: write` only for commenting),
+   don't persist the checkout token, pin runners, and set timeouts.
+
+### Step 4 — Image tags in one place
+
+**Built:** `scripts/image_tags.sh`: api = first 7 hex of the last commit
+touching `app/` or `frontend/`, worker = last commit touching `worker/`;
+outputs `api=…`/`worker=…` lines (for `$GITHUB_OUTPUT`), `--tfvars`
+(`images.auto.tfvars`) or `--tf-args` (`-var=` flags); refuses shallow
+clones. `push_images.sh` now calls it instead of computing tags. Verified:
+same tags as deployed (`e24591d`, `028d3a5`), `--tfvars` identical to the
+current file, bad flag → usage, shallow clone → clear error, and
+`push_images.sh` in a clean worktree skipped both existing tags and wrote an
+identical tfvars.
+
+**Why / alternatives:**
+- *One source of truth:* the plan job, the deploy job, local pushes and local
+  Terraform must agree, or Terraform would deploy a tag that was never pushed.
+- *Fixed 7 characters (`%H | cut -c1-7`), not `%h`:* `%h` lengthens when a
+  prefix is ambiguous among the objects a clone has, so different clones could
+  print different tags for the same commit.
+- *Refuse shallow clones:* with `fetch-depth: 1`, `git log -- app` only sees
+  HEAD and returns the wrong (unbuilt) tag; failing loudly beats deploying it.
+- Alternatives: tag every image with HEAD (redeploys unchanged services on
+  every commit), or content hashes of the build context (more precise, harder
+  to trace back to a commit).
+
+**Problems:** None.
+
+**Interview questions:**
+1. *Why can a CI job compute a different git short SHA than your laptop?*
+   `%h` abbreviations are only guaranteed unique among the objects in that
+   clone, so their length can differ; shallow clones also limit history. Use a
+   fixed-length prefix of the full SHA (or the full SHA) and full-history
+   checkouts.
+2. *How do you avoid redeploying services that didn't change?* Derive each
+   image's tag from the last commit touching that image's sources; unrelated
+   commits keep the same tag, so Terraform sees no change for that service.
+
+### Step 5 — Terraform workflow
+
+**Built:** `.github/workflows/terraform.yml` (paths: terraform/, app/,
+frontend/, worker/, the tag/push scripts, the workflow). `plan` on pull
+requests (reelops-gha-plan) posts or updates one PR comment (plan line,
+one bullet per resource change, full plan collapsed, account ID redacted).
+On push to main: `plan-main` saves the plan, writes it to the run summary and
+uploads it (1-day artifact); `deploy` (environment `production`, required
+reviewer, reelops-gha-deploy) runs only if there are changes, pushes missing
+images with `scripts/push_images.sh`, and applies exactly the saved plan.
+Settings come from `vars.ENABLE_COMPUTE`, `vars.ALLOWED_CIDRS`,
+`secrets.ALERT_EMAIL` (TF_VAR_*) and jobs fail if any is missing; the account
+ID is looked up via STS and masked; the state bucket name is computed.
+actionlint clean; comment formatting tested on a real local plan.
+
+**Why / alternatives:**
+- *Approve a saved plan:* environment approval happens before the job starts,
+  so a deploy that planned and applied itself would be approved blind;
+  plan-main shows the exact plan, deploy applies that file, and Terraform
+  rejects it if state changed in between.
+- *Terraform, not `aws ecs update-service`:* a CLI-registered task definition
+  isn't in state, so the next apply would roll it back; Terraform keeps the
+  image, IAM, CORS and scaling changes in one reviewed diff with git-based
+  rollback.
+- *No silent defaults for owner settings:* an unset ENABLE_COMPUTE would
+  default to true and resume a paused stack. When pausing/resuming locally,
+  also `gh variable set ENABLE_COMPUTE --body false|true`. When IPs change,
+  update `terraform.tfvars` and `gh variable set ALLOWED_CIDRS`, or the next
+  deploy restores the old allow-list.
+- *Concurrency:* PR plans cancel superseded ones; main runs queue in one group
+  and are never cancelled mid-apply.
+- *Reusing `push_images.sh`* keeps one implementation of "push missing tags";
+  trade-off: no GHA layer cache for deploy builds (minutes, only when an image
+  actually changes).
+- *CI can't change its own access:* PRs touching `github_oidc.tf` plan fine
+  but fail at apply (explicit deny); those changes are applied locally.
+
+**Problems:** shellcheck flagged intentional literal backticks (SC2016),
+annotated with a reason; the first comment test turned Terraform's
+"(config refers to values not yet known)" continuation lines into bogus
+bullets, so only `will be` / `must be` lines are listed now.
+
+**Interview questions:**
+1. *How do you make a manual approval in a CD pipeline meaningful?* Show the
+   approver the exact change (a saved plan in the run summary) and apply that
+   artifact after approval; reject it if state changed (stale plan) rather
+   than re-planning silently after approval.
+2. *Why shouldn't CI deploy with `aws ecs update-service` when you use
+   Terraform?* It creates drift: state still points at the old task definition,
+   so the next apply reverts it; changes bypass review and the single source of
+   truth.
+
+### Step 6 — Dependabot
+
+**Built:** `.github/dependabot.yml`: weekly (Monday 06:00 IST) updates for
+github-actions, pip (`/app`, `/worker`), npm (`/frontend`), docker (`/app`,
+`/worker`) and terraform (`/terraform/main`, `/terraform/bootstrap`), each with
+`cooldown: default-days: 14`, minor+patch grouped into one PR per entry,
+`build(deps)` conventional commit messages, a `dependencies` label and at most
+5 open PRs. Ignores: PyAV `>=19` (breaks faster-whisper 1.2.1), Python image
+minor/major tags (stay on 3.12; digests still update), Node majors (stay on
+24 LTS). Validated against the SchemaStore Dependabot v2 schema: 0 errors.
+
+**Why / alternatives:**
+- *Dependabot proposes, CI and the owner decide:* every update PR runs the full
+  CI (tests, lint, Trivy gate), so a breaking bump fails visibly instead of
+  landing.
+- *Cooldown 14 days:* automates the "at least two weeks old" rule used by hand
+  all project (time for bad releases to be caught and yanked); security
+  updates bypass it.
+- *Ignores record past lessons* (the PyAV break) and project constraints
+  (Python 3.12, Node 24 LTS) so Dependabot doesn't re-propose them weekly.
+- *Base image digests:* the docker ecosystem bumps `@sha256` pins, which is
+  how the worker's unfixed CVEs get fixed once Debian ships patches.
+- Alternatives: Renovate (more powerful grouping/automerge, a third-party app);
+  no automation (pins rot and CVEs accumulate).
+
+**Problems:** My first version used a YAML anchor under a top-level `x-common`
+key; schema validation showed Dependabot would reject it ("'x-common' was
+unexpected"), which only appears after pushing, as silently missing update
+PRs. Entries are now written out in full. Also a `curl` without `-L` fetched
+an empty schema (SchemaStore redirects).
+
+**Interview questions:**
+1. *How do you keep dependencies current without breaking production?* Pin
+   everything (lock files, image digests, action SHAs), let a bot propose
+   updates with a cooldown and grouping, run full CI on each update PR, and
+   review majors individually.
+2. *Why pin base images by digest and still let a bot update them?* The digest
+   makes builds reproducible; the bot's PRs bring security fixes in as
+   reviewable, tested changes instead of silently through a moving tag.
+
+### Step 7 — Apply the CI identity, configure GitHub
+
+**Built:** Applied `phase7.tfplan` (owner): OIDC provider + `reelops-gha-plan` +
+`reelops-gha-deploy` (7 added, 61 unchanged). Branch protection and required
+deployment reviewers turned out to need GitHub Pro on a private repo
+("Upgrade to GitHub Pro or make this repository public"); the owner chose to
+make the portfolio repo public. Before that: a full-history scan (46 commits:
+no account ID, email, allowlisted IPs, instance ID or key patterns in diffs,
+messages or author lines; only the noreply address; no env/tfvars/state files
+ever committed) and the same scan of all pending files. Added
+`scripts/redact.py` (replaces account ID, alert email and allowlisted IPs in
+text posted to PR comments and job summaries) and `::add-mask::` for the
+allowlisted IPs; tested on real `terraform state show` output (all
+occurrences removed).
+
+**Why / alternatives:**
+- *Public vs Pro vs no gate:* without required reviewers the deploy job would
+  run on every merge with no human check; public is free and suits a
+  portfolio; Pro (~$4/month) keeps it private; a workflow_dispatch-only deploy
+  is a weaker substitute (nothing stops a direct push).
+- *Masking isn't enough:* GitHub masks secrets in logs only; text posted
+  through the API (PR comments, step summaries) and non-secret variables
+  (ALLOWED_CIDRS) need explicit redaction.
+- *Public-repo Actions hardening:* read-only default `GITHUB_TOKEN`, approval
+  required for all external contributors' workflow runs; fork PRs never get
+  OIDC tokens or secrets, so they can't reach AWS.
+- *Environment-scoped variable* for the deploy role ARN: only jobs in
+  `production` can even see it; `deployment_branch_policy` allows only
+  protected branches (main) to deploy.
+- *Branch protection:* PR required (0 approvals, since a solo owner can't
+  approve their own PR), the six CI jobs as required checks, branch up to date,
+  linear history, no force-push/deletion, admins can bypass.
+
+**Problems:** The GitHub plan limitation only surfaced when probing the
+branch-protection API; checking plan features before designing the gate would
+have caught it earlier.
+
+**Interview questions:**
+1. *What changes when you make a repo with CI/CD public?* Logs, PR comments,
+   workflow files and history become visible: scan history for secrets and
+   personal data first, mask/redact non-secret identifiers, keep the default
+   token read-only, require approval for outside contributors' runs, and make
+   sure fork PRs can't obtain cloud credentials (no OIDC/secrets for forks).
+2. *How do GitHub Environments protect deployments?* Required reviewers pause a
+   job until approved, deployment branch policies restrict which refs can
+   deploy, and environment-scoped secrets/variables (and OIDC `sub` claims like
+   `environment:production`) are only available to jobs in that environment.
