@@ -931,3 +931,423 @@ at their pre-fix content with `git hash-object` + `update-index`, as before.
    The healthcheck defines how Docker judges a container healthy; `--wait`
    makes the `up` command block until services are healthy (or just running,
    for services without a healthcheck).
+
+---
+
+## Phase 4 — ECS Fargate
+
+### Step 1 — Network
+
+**Built:** `network.tf`: VPC `10.20.0.0/16` (DNS support and hostnames), public
+subnets `10.20.0.0/24` (ap-south-1a) and `10.20.1.0/24` (ap-south-1b), an
+internet gateway, a public route table, free S3 and DynamoDB gateway endpoints
+on it, and the VPC's default security group emptied. Also declared
+`enable_compute` (default true) for the nightly pause. Plan: 10 to add.
+
+**Why / alternatives:**
+- *Public IPs on tasks:* with no NAT, a task in a public subnet needs a public
+  IP to reach ECR, SQS, Polly, Logs and STS through the internet gateway.
+  Security groups block inbound, so it isn't an exposure. Each public IPv4
+  address costs $0.005/hour.
+- *Gateway endpoints* (S3, DynamoDB) are free route-table entries; ECR layers
+  live in S3, so image pulls use it too. Every other service needs paid
+  interface endpoints.
+- *Production design:* tasks in private subnets with no public IPs, the ALB
+  alone in public subnets, and outbound via NAT gateways (~$40/month each plus
+  data) or interface endpoints (~$9/month per endpoint per AZ), plus HTTPS,
+  WAF and flow logs.
+- `map_public_ip_on_launch = false`: public IPs are requested explicitly per
+  service. *Default SG locked down*: it allows all traffic between members, and
+  anything launched without an SG lands in it (a common audit finding).
+
+**Problems:** None in the config. A sloppy verification one-liner (`paste`)
+paired plan lines wrongly and made `10.20.0.0/24` look like it was in 1b;
+re-reading each subnet block showed the config was right. Lesson: verify plans
+by resource block, not by flattened lines.
+
+**Interview questions:**
+1. *Why do Fargate tasks in a public subnet need `assign_public_ip`?* The
+   internet gateway only routes traffic for addresses that have a public IP;
+   without one (and without NAT) the task can't reach ECR, CloudWatch or other
+   AWS APIs, and fails to start with image-pull errors.
+2. *What's the difference between gateway and interface VPC endpoints?*
+   Gateway endpoints (S3 and DynamoDB only) are route-table targets and free.
+   Interface endpoints (PrivateLink) are ENIs with private IPs in your subnets,
+   available for most services, billed hourly per AZ plus per GB.
+
+### Step 2 — ECR and image pushes
+
+**Built:** `ecr.tf`: repos `reelops-api` and `reelops-worker` (IMMUTABLE tags,
+scan on push, lifecycle keeps 10 images, `force_delete` for dev), applied
+early with a targeted plan. `scripts/push_images.sh` builds linux/amd64
+single-manifest images, tags each with the short SHA of the last commit that
+touched its folder, logs in via the instance role, skips tags already in ECR,
+writes `images.auto.tfvars` (git-ignored) and reports scan results. Variables
+`api_image_tag` / `worker_image_tag` have no default and reject `latest`.
+Pushed `reelops-api:d52ab55` (63 MB) and `reelops-worker:41abfb9` (481 MB).
+
+**Why / alternatives:**
+- *Immutable SHA tags:* each tag is exactly one image traceable to a commit;
+  rollback = deploy the previous tag; nothing can be silently replaced.
+  `latest` says nothing about what's running.
+- *Per-folder SHA:* unrelated commits don't create a new tag (and a redeploy)
+  for identical code. Refuse to build with uncommitted changes in the folder.
+- *Targeted apply for ECR first:* images must exist before task definitions
+  reference them; `-target` is for one-off bootstraps like this, not routine.
+- `force_delete` only in dev: in prod, deleting a repo deletes the images that
+  running services and rollbacks need.
+- *Credential helper* (`amazon-ecr-credential-helper`) would avoid storing the
+  12-hour token in `~/.docker/config.json`; noted for later.
+
+**Problems:**
+- *OCI index instead of an image:* Docker 29 (containerd image store, BuildKit
+  attestations) pushed each tag as an image index plus two untagged children
+  (the platform manifest and a provenance attestation): 3 ECR entries per push.
+  ECR's lifecycle "keep 10" would count all three, and could expire a child that
+  a tagged index still points to. Fixed with `--provenance=false --sbom=false`
+  (single `image.manifest`), deleted the 6 unused entries and re-pushed the same
+  tags. Trade-off: no build provenance/SBOM attached; Phase 7 can generate an
+  SBOM and sign images in CI instead.
+- *"Scan not finished":* my first guess (index not scannable, then empty
+  registry scan rules) was wrong. The scans ran; `aws ecr wait
+  image-scan-complete` fails immediately with ScanNotFoundException when called
+  right after a push, instead of waiting. Replaced with a polling loop (not yet
+  exercised: both tags already existed on the re-run).
+- I predicted the API tag would be the Phase 3 API commit, but the moto-tests
+  commit also touched `app/` (tests), so the tag is `d52ab55`; correct
+  behaviour, wrong prediction.
+- *Findings:* API 3 HIGH (glibc, zlib, from the Debian base); worker 2 CRITICAL
+  (tiff, brotli) + 14 HIGH, mostly from apt ffmpeg's dependencies. To fix by
+  rebuilding on a patched base digest; Phase 7: Trivy in CI failing on
+  CRITICAL, Dependabot bumping the base digest.
+
+**Interview questions:**
+1. *Why use immutable image tags?* So a tag always refers to the same image:
+   deployments are reproducible and auditable, rollbacks are exact, and an
+   attacker or mistake can't overwrite a deployed tag. Combine with SHA tags
+   (or deploy by digest).
+2. *What's an OCI image index and why might it surprise you in a registry?*
+   A manifest that points to other manifests (per-platform images, and with
+   BuildKit, attestations). Registries list the children as separate untagged
+   artifacts, which affects scanning, lifecycle rules and image counts. For a
+   single-platform service, build with attestations disabled or understand how
+   your registry treats indexes.
+
+### Step 3 — IAM for ECS tasks
+
+**Built:** `iam_ecs.tf`: an execution role with the AWS-managed
+`AmazonECSTaskExecutionRolePolicy`; an API task role (DynamoDB Put/GetItem on
+the table, S3 PutObject `raw/*`, GetObject `output/*`); a worker task role (SQS
+Receive/Delete/ChangeMessageVisibility/GetQueueAttributes on the main queue,
+S3 GetObject `raw/*`, PutObject `output/*`, DynamoDB Get/UpdateItem, Polly
+SynthesizeSpeech/DescribeVoices on `*` limited to ap-south-1). Trust policies
+allow only `ecs-tasks.amazonaws.com` from this account. Plan: 16 to add.
+Verified with the IAM policy simulator on the rendered policies before apply:
+34/34 allow/deny checks pass, including denies on the tfstate bucket.
+
+**Why / alternatives:**
+- *Execution vs task role:* the execution role is for the ECS agent (pull
+  image, write logs, fetch secrets); the task role is what the app's SDK uses.
+  Separate so the app can't pull images/read start-up secrets and the agent
+  can't touch data.
+- *Presigned URLs* are requests signed with the API role's credentials, so S3
+  evaluates that role's permissions when the browser uses them; the API needs
+  PutObject/GetObject on the prefixes even though it never moves bytes.
+- *`*` resources:* Polly's DescribeVoices has no ARN and SynthesizeSpeech can
+  only be scoped to lexicons, so `*` plus an `aws:RequestedRegion` condition.
+  The managed execution policy uses `*` too; tighter option: a custom policy
+  for our two repos and log groups.
+- *Trust conditions* (`aws:SourceAccount`, `aws:SourceArn`) prevent another
+  account's ECS from assuming the roles (confused deputy).
+- *Deliberately absent:* `s3:ListBucket` (missing keys give 403 instead of
+  404, and no key enumeration).
+- *Added after review:* `s3:AbortMultipartUpload` on `output/*`. I first left
+  it out (outputs are below boto3's 8 MB multipart threshold, and the lifecycle
+  rule removes orphaned parts after 1 day), but boto3's `upload_file` calls it
+  on a failed multipart upload, and a lifecycle rule is a backstop, not a
+  substitute. Simulator: allowed on `output/*`, denied on `raw/*` and the
+  tfstate bucket.
+
+**Problems:** My first simulator harness was broken: `--policy-input-list`
+doesn't expand `file://` inside list items, every call failed with
+InvalidInput, and the harness counted errors as DENY, so the "should deny"
+rows falsely passed. Fixed by passing the JSON as a string and counting errors
+as ERROR. Lesson: a negative test that passes when the tool fails proves
+nothing; make failures loud.
+
+**Interview questions:**
+1. *What's the difference between an ECS task execution role and a task
+   role?* The execution role is assumed by the ECS agent to pull the image from
+   ECR, send logs to CloudWatch and fetch secrets for the container's
+   environment. The task role is assumed by the application inside the
+   container for its own AWS calls. Give each only what that party needs.
+2. *How do you verify an IAM policy is least-privilege before deploying it?*
+   Render it (e.g. from the Terraform plan) and run it through the IAM policy
+   simulator (`simulate-custom-policy`) with both expected-allow and
+   expected-deny cases, including sensitive resources like the state bucket;
+   then confirm in the real environment, and use IAM Access Analyzer to review
+   unused permissions over time.
+
+### Step 4 — Log groups and ECS cluster
+
+**Built:** `ecs.tf`: log groups `/reelops/dev/api` and `/reelops/dev/worker`
+(7-day retention) and the `reelops-dev` ECS cluster with Container Insights
+disabled; outputs `ecs_cluster_name` and `log_groups`. Plan: 19 to add.
+
+**Why / alternatives:**
+- *Terraform-managed log groups:* groups auto-created by the awslogs driver
+  (`awslogs-create-group`) never expire by default and aren't owned by
+  Terraform; here retention is set and `destroy` removes them. 7 days is enough
+  for dev; prod might keep 30-90 days or export to S3.
+- *Container Insights off:* the cluster itself is free on Fargate; Insights adds
+  billed custom metrics and performance log events (more with enhanced
+  observability). Free per-service CPU/memory metrics and SQS metrics are
+  enough for dev and Phase 5 autoscaling. Turn it on to diagnose per-task
+  performance.
+
+**Problems:** None.
+
+**Interview questions:**
+1. *Why create CloudWatch log groups in Terraform instead of letting ECS create
+   them?* To set retention (auto-created groups keep logs forever and keep
+   costing), to manage encryption and tags, and so the infrastructure owns and
+   cleans them up.
+2. *What does Container Insights give you, and why might you leave it off?*
+   Per-cluster/service/task/container metrics (CPU, memory, network, storage)
+   and performance logs. It's billed as custom metrics plus log ingestion, so
+   for small dev clusters the free service-level metrics are often enough.
+
+### Step 5 — Task definitions
+
+**Built:** `task_definitions.tf`: Fargate/X86_64/awsvpc task definitions.
+`api`: 0.25 vCPU / 512 MB, port 8000, container health check on `/healthz`.
+`worker`: 2 vCPU / 4 GB, `command = ["consume"]`, `initProcessEnabled`,
+`stopTimeout = 30`, an ephemeral volume at `/tmp`. Both: images by immutable
+SHA tag, env from Terraform references, awslogs (non-blocking, 25 MB buffer),
+non-root as built, `readonlyRootFilesystem = true`. Plan: 21 to add.
+
+**Why / alternatives:**
+- *Read-only root, tested first:* `docker run --read-only` showed the API writes
+  nothing, and the worker fails with "No usable temporary directory" until
+  `/tmp` is writable; with `--tmpfs /tmp` both the CLI pipeline (12.0 s) and
+  consume mode ran cleanly. On Fargate: a task `volume` with no host path,
+  mounted at `/tmp`. A compromised process can't modify code or persist files.
+- *Container health check vs ALB health check:* ECS uses the container check
+  to replace unhealthy tasks; the ALB's check decides which targets get
+  traffic. Both hit `/healthz`.
+- *Non-blocking log mode:* stdout never blocks the app if CloudWatch is slow;
+  trade-off: logs dropped if the buffer fills. Blocking mode guarantees
+  delivery but can stall the app.
+- *Sizes:* API is tiny (JSON only). Worker: Whisper int8 and ffmpeg want CPU;
+  2 vCPU / 4 GB is a starting point; Step 9 timings will tell if it's right.
+
+**Problems (found in Step 9):** The local test was not equivalent to Fargate.
+`docker run --tmpfs /tmp` creates a world-writable (1777) mount, but Fargate
+creates the task volume as `root:root 0755`, so the non-root worker could not
+write to `/tmp` and every job failed ("No usable temporary directory"). Fixed
+with a non-essential init container (same image, `user = "0"`,
+`chmod 1777 /tmp`) that the worker `dependsOn` with condition SUCCESS; the root
+filesystem stays read-only. Reproduced faithfully with a host directory owned
+`root:root 0755` before applying. Lesson: a local stand-in must reproduce the
+platform's actual behaviour (here ownership and mode), or the test proves
+nothing.
+
+**Interview questions:**
+1. *How do you run a container with a read-only root filesystem when the app
+   needs scratch space?* Set `readonlyRootFilesystem` and mount a writable
+   volume only where needed (on Fargate a task-level ephemeral volume, on
+   Kubernetes an `emptyDir`), after testing locally with `docker run
+   --read-only --tmpfs /tmp`.
+2. *What's the difference between `stopTimeout` and the application's own
+   shutdown grace period?* `stopTimeout` is how long ECS waits after SIGTERM
+   before SIGKILL; the app's grace period (20 s here) must be shorter so the app
+   can finish or hand back its work before being killed.
+
+### Step 6 — Security groups
+
+**Built:** `security.tf`: ALB SG (80 from each `allowed_cidrs` entry; egress
+8000 to the API SG only), API SG (8000 from the ALB SG only; egress 443),
+worker SG (no inbound; egress 443). `allowed_cidrs` (home IP and dev box IP,
+in git-ignored `terraform.tfvars`) has no default, must be valid CIDRs, and
+rejects `0.0.0.0/0` / `::/0`. Plan: 30 to add.
+
+**Why / alternatives:**
+- *Not open to the internet yet:* the API is unauthenticated; anyone finding
+  the ALB could upload 200 MB videos and burn Fargate/Polly/S3 spend. The
+  validation makes that a rule, not a comment; later: auth, rate limiting, WAF.
+- *SG-to-SG references* (ALB → API on 8000) instead of CIDRs: follows tasks as
+  their IPs change, and nothing else in the VPC can reach the API.
+- *Egress 443 to 0.0.0.0/0:* on Fargate the ECS agent (ECR pull, logs) uses the
+  task ENI; SQS/Polly are public endpoints on large changing ranges. Narrowing
+  the destination needs interface endpoints (cost) or prefix lists (S3/DynamoDB
+  only). DNS, the ECS credentials endpoint (169.254.170.2) and time sync aren't
+  filtered by SGs.
+- *One resource per rule* (`aws_vpc_security_group_*_rule`): descriptions per
+  rule, and changing one rule doesn't touch the others. Terraform removes AWS's
+  default allow-all egress from groups it creates.
+
+**Problems:** None. Noted: the dev box IP is auto-assigned (not an Elastic IP)
+and changes on stop/start, and home IPs rotate; update `terraform.tfvars` and
+apply when they do (symptom: requests to the ALB time out).
+
+**Interview questions:**
+1. *Why reference security groups instead of CIDRs between tiers?* Task IPs
+   change constantly; an SG reference allows exactly the members of the source
+   group, wherever they are, and nothing else in the subnet.
+2. *Your Fargate task can't pull its image but the SG allows the app's
+   traffic. What did you miss?* On Fargate the image pull and log delivery use
+   the task's own ENI, so the task SG must allow outbound 443 (and the task
+   needs a route out: public IP + IGW, NAT, or VPC endpoints for ECR, S3 and
+   Logs).
+
+### Step 7 — Load balancer and ECS services
+
+**Built:** `alb.tf` (internet-facing ALB in both public subnets,
+`drop_invalid_header_fields`; IP target group on 8000 with `/healthz` health
+check and 30 s deregistration delay; HTTP :80 listener) and `services.tf` (api
+and worker Fargate services, desired 1, public IPs, rolling deploy 100/200,
+circuit breaker with rollback, 30 s health-check grace for the API,
+`wait_for_steady_state`, `propagate_tags`). All five resources use
+`count = var.enable_compute ? 1 : 0`. Output `api_url`. Plan: 35 to add with
+compute, 30 with `enable_compute=false`.
+
+**Why / alternatives:**
+- *`count` gate for the pause:* the ALB (~$0.0239/h plus LCUs plus 2 public
+  IPs) and running tasks are what cost money when idle; everything else is free
+  or near-free at rest. Alternatives: scale services to 0 (the ALB still bills),
+  or separate Terraform stacks (more complexity).
+- *Rolling 100/200 + circuit breaker:* no capacity drop during deploys, and a
+  bad image rolls back automatically instead of crash-looping. Alternatives:
+  blue/green with CodeDeploy (traffic shifting, more setup).
+- *IP target type:* Fargate tasks register by ENI IP. *30 s deregistration
+  delay* instead of 300 s because API requests are milliseconds long.
+- *`depends_on` the listener:* ECS rejects a target group not yet attached to a
+  load balancer; the target group reference alone doesn't order it after the
+  listener.
+- *HTTPS* (ACM + domain, 80 → 443 redirect, WAF) is the production upgrade.
+
+**Problems:** None. Phase 5 note: autoscaling will need
+`ignore_changes = [desired_count]` on the services.
+
+**Interview questions:**
+1. *What does the ECS deployment circuit breaker do?* It watches a rolling
+   deployment; if new tasks repeatedly fail to start or fail health checks, it
+   marks the deployment failed and (with rollback enabled) returns the service
+   to the last steady-state task definition, instead of retrying forever.
+2. *Why set `health_check_grace_period_seconds` on an ECS service behind an
+   ALB?* New tasks need time to start; without a grace period, early failed
+   load balancer health checks can make ECS kill tasks before they're ready,
+   causing a restart loop.
+
+### Step 8 — Full plan and cost
+
+**Built:** The full Phase 4 plan, saved to `phase4.tfplan`: 35 to add
+(network 10, IAM 6, logs+cluster 3, task definitions 2, security groups 9, ALB
+3, services 2), 0 to change, 0 to destroy; the 20 existing resources (Phase 2
+plus ECR) are no-ops. With `enable_compute=false` it would be 30.
+
+**Why / alternatives:** Reviewing defaults surfaced: `aws_default_security_group`
+adopts (not creates) the VPC default SG; the S3 gateway endpoint policy is full
+access by default (hardening: allow only our bucket and the ECR layer bucket);
+ECS exec off and ALB desync mitigation "defensive" are good defaults.
+
+*Running cost (approximate, ap-south-1, on-demand; verify on the pricing
+pages):* worker 2 vCPU/4 GB ~$0.10/h, API 0.25 vCPU/0.5 GB ~$0.012/h, ALB
+~$0.024/h plus LCUs (near zero idle), 4 public IPv4 (2 ALB + 2 tasks) $0.02/h
+→ ~$0.16/h, ~$3.75/day, ~$110/month if left on 24/7. Paused: ECR storage
+(~0.55 GB) plus idle S3/DynamoDB/SQS/logs, roughly $0.10/month. Per job: Polly
+neural is the main variable cost (~$0.006 for the 29 s sample).
+
+**Problems:** None.
+
+**Interview questions:**
+1. *What dominates the cost of a small Fargate stack, and how do you cut it?*
+   vCPU and memory hours of running tasks, then the ALB's hourly charge and
+   public IPv4 addresses. Right-size tasks from measurements, scale workers to
+   zero when the queue is empty (Phase 5), pause dev at night, consider Fargate
+   Spot or ARM (Graviton) for workers.
+2. *Why does the AWS default security group appear as "create" in a Terraform
+   plan?* `aws_default_security_group` is a special resource that adopts the
+   existing default SG and enforces the rules you declare (here none); destroying
+   it only removes it from state.
+
+### Step 9 — Verification on Fargate
+
+**Built / verified:**
+- *9a:* both services steady (desired 1 / running 1, rollout COMPLETED); API
+  target healthy; real SGs have exactly the 6 declared rules (no default
+  allow-all egress).
+- *9b:* `/healthz` via the ALB: 200 in 4 ms; the API task's public IP on 8000
+  times out (SG allows only the ALB).
+- *9c:* `API_URL=<alb> scripts/e2e.sh` passed: pending → processing (+2.1 s)
+  → done (+8.2 s), duplicate skipped (read from CloudWatch). Proof it ran on
+  Fargate with the task role: CloudTrail shows all 7 Polly calls by
+  `assumed-role/reelops-dev-worker-task/<ecs-task-id>` from the worker task's
+  public IP; ECS shows the log stream's task is FARGATE, `reelops-dev-worker:2`,
+  and its private IP matches the worker ID in the log.
+- *9d:* Fargate stages (2 vCPU): audio 0.1 s, transcribe 0.8 s, captions 0.0 s,
+  voiceover 1.6 s, render 3.2 s (dev box: 0.1 / 2.3 / 0.0 / 1.9 / 7.1). Cold
+  start 26.3 s from task created to polling: provisioning 11.4 s, image pull
+  (481 MB) 8.6 s, init-tmp + container start 5.6 s, imports + model load
+  0.5 s. Model load is negligible; Phase 5's scale-from-zero latency is
+  dominated by Fargate provisioning and the image pull.
+- *9e:* pause = `terraform apply -var enable_compute=false` (plan: exactly 5
+  to destroy); resume = `terraform apply`.
+
+**Why / alternatives:** Logs can't prove *which identity* made calls (botocore's
+container credential provider logs nothing at INFO, unlike the instance-role
+provider), so CloudTrail's `userIdentity` is the authoritative proof. Image
+size matters for cold start: shrinking the worker image (static ffmpeg,
+smaller base) or keeping one warm task are the levers for Phase 5.
+
+**Problems:**
+- *Read-only root + Fargate volume permissions:* the worker failed every job
+  with "No usable temporary directory": Fargate creates the task volume as
+  `root:root 0755`, unlike Docker's local `--tmpfs` (1777). Fixed with an
+  init container (`chmod 1777 /tmp`, worker `dependsOn` SUCCESS); reproduced
+  and verified locally with a `root:root 0755` host directory before applying.
+  The failed test job behaved as designed: 3 attempts, status `failed` with
+  the error, message to the DLQ, alarm email, then purged.
+- *My verification scripts:* `filter-log-events` auto-paginates in text mode
+  and printed an extra `None` per empty page, corrupting a variable; fixed by
+  filtering `None` and taking the first line.
+- A rollout showed IN_PROGRESS for a few seconds after the apply; ECS marks a
+  deployment COMPLETED shortly after the old task stops.
+
+**Interview questions:**
+1. *How do you prove a container used its task role rather than some other
+   credentials?* Check CloudTrail: `userIdentity.arn` shows
+   `assumed-role/<task-role>/<task-id>` and `sourceIPAddress` the task's IP.
+   Inside the task, `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` being set and
+   `boto3.Session().get_credentials().method == "container-role"` confirm the
+   source.
+2. *What makes up a Fargate task's cold start, and how do you shorten it?*
+   Capacity provisioning and ENI attachment, image pull, container start and
+   app initialisation. Shrink the image (and use the same region / gateway
+   endpoint for ECR layers), use SOCI lazy loading for large images, keep
+   init fast, or keep a minimum number of warm tasks.
+
+### Step 10 — Commit and push
+
+**Built:** One Conventional Commit per Phase 4 step, with the two fixes found
+along the way as separate `fix:` commits (worker AbortMultipartUpload
+permission; Fargate `/tmp` init container), pushed to `main`. Git-ignored and
+not committed: `terraform.tfvars` (email, IPs), `images.auto.tfvars`, saved
+`*.tfplan` files.
+
+**Why / alternatives:** Files that changed in several steps (`variables.tf`,
+`outputs.tf`, `iam_ecs.tf`, `task_definitions.tf`) were staged at each step's
+content, and every intermediate commit was checked with `terraform validate`
+in a temporary worktree, so each commit is a working state.
+
+**Problems:** None.
+
+**Interview questions:**
+1. *Why keep fixes as separate commits instead of squashing them into the
+   feature?* The history records what broke and why (useful for reviews,
+   `git blame`, and post-incident learning), and a fix can be reverted or
+   cherry-picked on its own.
+2. *How do you keep IP allowlists and other environment values out of a public
+   repo while still versioning the infrastructure?* Commit the variable
+   declarations and a `.tfvars.example`; keep real values in git-ignored tfvars
+   locally and in CI secrets/variables (`TF_VAR_*`), or in SSM/Secrets Manager.
