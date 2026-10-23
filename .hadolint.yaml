@@ -1,0 +1,7 @@
+# hadolint config (CI lints worker/Dockerfile and app/Dockerfile).
+ignored:
+  # DL3008 "pin versions in apt-get install": Debian repositories keep only the
+  # current version, and security updates replace it, so a pinned version
+  # breaks the build the day a fix ships. The base image is pinned by digest;
+  # exact package reproducibility would need snapshot.debian.org.
+  - DL3008

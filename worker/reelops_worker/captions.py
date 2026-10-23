@@ -59,7 +59,7 @@ def split_segment(segment: Segment, max_chars: int, max_lines: int) -> list[Capt
 
     captions = []
     start, done = segment.start, 0
-    for chunk, weight in zip(chunks, weights):
+    for chunk, weight in zip(chunks, weights, strict=True):
         done += weight
         end = segment.start + span * done / total
         captions.append(Caption(start, end, tuple(chunk)))

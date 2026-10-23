@@ -57,7 +57,7 @@ def test_long_segment_splits_within_limits():
     # Captions tile the segment exactly: no gaps, no overlaps.
     assert captions[0].start == seg.start
     assert captions[-1].end == pytest.approx(seg.end)
-    for a, b in zip(captions, captions[1:]):
+    for a, b in zip(captions, captions[1:], strict=False):  # consecutive pairs
         assert a.end == pytest.approx(b.start)
 
 

@@ -38,7 +38,7 @@ def slots(segments: list[Segment], duration: float) -> list[float]:
     """
     starts = [s.start for s in segments]
     ends = starts[1:] + [duration]
-    return [max(0.0, end - start) for start, end in zip(starts, ends)]
+    return [max(0.0, end - start) for start, end in zip(starts, ends, strict=True)]
 
 
 def fit_to_slot(clip: float, slot: float, max_speedup: float) -> Fit:
@@ -155,7 +155,7 @@ def build_voiceover(
     placed: list[tuple[float, Path]] = []
     sped_up = 0
 
-    for i, (segment, slot) in enumerate(zip(segments, slots(segments, duration))):
+    for i, (segment, slot) in enumerate(zip(segments, slots(segments, duration), strict=True)):
         mp3 = synthesize(polly, segment.text, voice_id, language, settings.polly_engine, clips_dir / f"{i:04d}.mp3")
         fit = fit_to_slot(ffmpeg.duration(mp3), slot, settings.max_speedup)
         if fit.tempo > 1.0:

@@ -445,7 +445,8 @@ def main(stop: threading.Event | None = None) -> int:
         stopping=stop,
         protection=TaskProtection(expires_minutes=settings.task_protection_minutes),
     )
-    log.info("task scale-in protection: %s", "enabled" if consumer.protection.enabled else "disabled (no ECS_AGENT_URI)")
+    protection = "enabled" if consumer.protection.enabled else "disabled (no ECS_AGENT_URI)"
+    log.info("task scale-in protection: %s", protection)
     consumer.install_signal_handlers()
     consumer.run_forever()
     return 0

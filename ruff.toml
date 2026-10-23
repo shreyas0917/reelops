@@ -1,0 +1,10 @@
+# Python lint for app/ and worker/ (CI: ruff check).
+target-version = "py312"
+line-length = 120
+
+[lint]
+# pycodestyle, pyflakes, import order, bugbear, pyupgrade
+select = ["E", "W", "F", "I", "B", "UP"]
+
+[lint.isort]
+known-first-party = ["reelops_api", "reelops_worker"]

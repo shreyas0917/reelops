@@ -79,7 +79,8 @@ def fake_pipeline(monkeypatch):
 def s3_event(key, size=1000, etag="etag-1", bucket=BUCKET):
     # S3 URL-encodes keys in event JSON, form style.
     obj = {"key": quote_plus(key, safe="/"), "size": size, "eTag": etag}
-    return json.dumps({"Records": [{"eventName": "ObjectCreated:Put", "s3": {"bucket": {"name": bucket}, "object": obj}}]})
+    record = {"eventName": "ObjectCreated:Put", "s3": {"bucket": {"name": bucket}, "object": obj}}
+    return json.dumps({"Records": [record]})
 
 
 def deliver(aws, body):
