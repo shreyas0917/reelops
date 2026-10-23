@@ -1,0 +1,126 @@
+# Weekly dependency PRs; every one runs through CI (ci.yml) before review.
+# cooldown: only versions at least 14 days old (security updates bypass it).
+# Entries are written out in full: Dependabot rejects unknown keys, and YAML
+# anchors would need a top-level helper key.
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Asia/Kolkata
+    cooldown:
+      default-days: 14
+    open-pull-requests-limit: 5
+    labels: [dependencies]
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: pip
+    directory: /app
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Asia/Kolkata
+    cooldown:
+      default-days: 14
+    open-pull-requests-limit: 5
+    labels: [dependencies]
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: pip
+    directory: /worker
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Asia/Kolkata
+    cooldown:
+      default-days: 14
+    open-pull-requests-limit: 5
+    labels: [dependencies]
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+    ignore:
+      # PyAV 19 removed av.open(metadata_errors=...), which faster-whisper
+      # 1.2.1 calls (Phase 1). Remove once faster-whisper supports it.
+      - dependency-name: av
+        versions: [">=19"]
+
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Asia/Kolkata
+    cooldown:
+      default-days: 14
+    open-pull-requests-limit: 5
+    labels: [dependencies]
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: docker
+    directories: [/app, /worker]
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Asia/Kolkata
+    cooldown:
+      default-days: 14
+    open-pull-requests-limit: 5
+    labels: [dependencies]
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+    ignore:
+      # The project targets Python 3.12: digest updates only, no 3.13/3.14 tags.
+      - dependency-name: python
+        update-types: [version-update:semver-major, version-update:semver-minor]
+      # Stay on Node 24 LTS; minor/patch (incl. security releases) still come.
+      - dependency-name: node
+        update-types: [version-update:semver-major]
+
+  - package-ecosystem: terraform
+    directories: [/terraform/main, /terraform/bootstrap]
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Asia/Kolkata
+    cooldown:
+      default-days: 14
+    open-pull-requests-limit: 5
+    labels: [dependencies]
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
