@@ -1,7 +1,7 @@
 # Local stack against the real AWS resources from terraform/main.
 #
 #   scripts/env_from_tf.sh        # writes .env from terraform output
-#   docker compose up -d --build
+#   docker compose up -d --build --wait   # --wait: until api is healthy
 #   docker compose logs -f worker
 #
 # No credentials here: containers use the EC2 instance role via IMDS.
