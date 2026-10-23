@@ -79,24 +79,45 @@ resource "aws_ecs_task_definition" "worker" {
     name = "tmp"
   }
 
-  container_definitions = jsonencode([{
-    name        = "worker"
-    image       = "${aws_ecr_repository.this["worker"].repository_url}:${var.worker_image_tag}"
-    essential   = true
-    command     = ["consume"]
-    environment = concat(local.common_env, [{ name = "REELOPS_JOBS_QUEUE_URL", value = aws_sqs_queue.jobs.url }])
-    # Tested: the pipeline only needs a writable /tmp.
-    readonlyRootFilesystem = true
-    mountPoints            = [{ sourceVolume = "tmp", containerPath = "/tmp", readOnly = false }]
+  container_definitions = jsonencode([
+    # Fargate creates the volume as root:root 0755, so the non-root worker
+    # can't write to it (Docker's local --tmpfs is 1777, which hid this).
+    # This container runs as root for ~1 s, makes it a normal /tmp (1777),
+    # and exits; the worker starts only after it succeeds.
+    {
+      name                   = "init-tmp"
+      image                  = "${aws_ecr_repository.this["worker"].repository_url}:${var.worker_image_tag}"
+      essential              = false
+      user                   = "0"
+      entryPoint             = ["chmod", "1777", "/tmp"]
+      command                = []
+      readonlyRootFilesystem = true
+      mountPoints            = [{ sourceVolume = "tmp", containerPath = "/tmp", readOnly = false }]
+      logConfiguration = {
+        logDriver = "awslogs"
+        options   = merge(local.log_options, { "awslogs-group" = aws_cloudwatch_log_group.worker.name, "awslogs-stream-prefix" = "init" })
+      }
+    },
+    {
+      name        = "worker"
+      image       = "${aws_ecr_repository.this["worker"].repository_url}:${var.worker_image_tag}"
+      essential   = true
+      command     = ["consume"]
+      environment = concat(local.common_env, [{ name = "REELOPS_JOBS_QUEUE_URL", value = aws_sqs_queue.jobs.url }])
+      dependsOn   = [{ containerName = "init-tmp", condition = "SUCCESS" }]
+      # The pipeline only needs a writable /tmp (made writable by init-tmp).
+      readonlyRootFilesystem = true
+      mountPoints            = [{ sourceVolume = "tmp", containerPath = "/tmp", readOnly = false }]
 
-    # init as PID 1 forwards SIGTERM and reaps orphaned ffmpeg (Phase 3 fix).
-    linuxParameters = { initProcessEnabled = true }
-    # SIGTERM -> SIGKILL window; above the worker's 20 s job grace period.
-    stopTimeout = 30
+      # init as PID 1 forwards SIGTERM and reaps orphaned ffmpeg (Phase 3 fix).
+      linuxParameters = { initProcessEnabled = true }
+      # SIGTERM -> SIGKILL window; above the worker's 20 s job grace period.
+      stopTimeout = 30
 
-    logConfiguration = {
-      logDriver = "awslogs"
-      options   = merge(local.log_options, { "awslogs-group" = aws_cloudwatch_log_group.worker.name, "awslogs-stream-prefix" = "worker" })
-    }
-  }])
+      logConfiguration = {
+        logDriver = "awslogs"
+        options   = merge(local.log_options, { "awslogs-group" = aws_cloudwatch_log_group.worker.name, "awslogs-stream-prefix" = "worker" })
+      }
+    },
+  ])
 }
