@@ -17,6 +17,26 @@ variable "enable_compute" {
   default     = true
 }
 
+variable "api_image_tag" {
+  description = "Tag of the reelops-api image in ECR (git short SHA). Written to images.auto.tfvars by scripts/push_images.sh."
+  type        = string
+
+  validation {
+    condition     = var.api_image_tag != "latest" && can(regex("^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$", var.api_image_tag))
+    error_message = "api_image_tag must be a specific image tag (e.g. a git SHA), never \"latest\"."
+  }
+}
+
+variable "worker_image_tag" {
+  description = "Tag of the reelops-worker image in ECR (git short SHA). Written to images.auto.tfvars by scripts/push_images.sh."
+  type        = string
+
+  validation {
+    condition     = var.worker_image_tag != "latest" && can(regex("^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$", var.worker_image_tag))
+    error_message = "worker_image_tag must be a specific image tag (e.g. a git SHA), never \"latest\"."
+  }
+}
+
 variable "alert_email" {
   description = "Email address subscribed to the alerts SNS topic. Set in terraform.tfvars (git-ignored) or TF_VAR_alert_email in CI."
   type        = string

@@ -30,3 +30,8 @@ output "alerts_topic_arn" {
   description = "SNS topic for alarm notifications"
   value       = aws_sns_topic.alerts.arn
 }
+
+output "ecr_repository_urls" {
+  description = "ECR repository URLs by image (used by scripts/push_images.sh)"
+  value       = { for k, repo in aws_ecr_repository.this : k => repo.repository_url }
+}
