@@ -35,3 +35,13 @@ output "ecr_repository_urls" {
   description = "ECR repository URLs by image (used by scripts/push_images.sh)"
   value       = { for k, repo in aws_ecr_repository.this : k => repo.repository_url }
 }
+
+output "ecs_cluster_name" {
+  description = "ECS cluster running the api and worker services"
+  value       = aws_ecs_cluster.main.name
+}
+
+output "log_groups" {
+  description = "CloudWatch log groups by service"
+  value       = { api = aws_cloudwatch_log_group.api.name, worker = aws_cloudwatch_log_group.worker.name }
+}
