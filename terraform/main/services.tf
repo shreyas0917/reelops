@@ -1,7 +1,5 @@
-# ECS services. Created only when var.enable_compute is true.
-#
-# Phase 5: once autoscaling manages desired_count, add
-# lifecycle { ignore_changes = [desired_count] } so applies don't reset it.
+# ECS services. Created only when var.enable_compute is true. The worker's
+# desired_count is managed by autoscaling (autoscaling.tf).
 
 resource "aws_ecs_service" "api" {
   count = local.compute
@@ -50,8 +48,10 @@ resource "aws_ecs_service" "worker" {
   name            = "${local.name}-worker"
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.worker.arn
-  desired_count   = 1 # autoscaling on queue depth comes in Phase 5
-  launch_type     = "FARGATE"
+  # Only used when the service is created (e.g. on resume); afterwards the
+  # autoscaler owns desired_count (see lifecycle below and autoscaling.tf).
+  desired_count = 1
+  launch_type   = "FARGATE"
 
   network_configuration {
     subnets          = [for s in aws_subnet.public : s.id]
@@ -70,4 +70,10 @@ resource "aws_ecs_service" "worker" {
 
   wait_for_steady_state = true
   propagate_tags        = "SERVICE"
+
+  # Without this, every plan would try to reset the autoscaler's count to 1:
+  # stopping busy workers after a scale-out, or starting one after scale-in.
+  lifecycle {
+    ignore_changes = [desired_count]
+  }
 }
