@@ -45,3 +45,13 @@ output "log_groups" {
   description = "CloudWatch log groups by service"
   value       = { api = aws_cloudwatch_log_group.api.name, worker = aws_cloudwatch_log_group.worker.name }
 }
+
+output "api_url" {
+  description = "Public URL of the API (ALB). null while compute is paused."
+  value       = var.enable_compute ? "http://${aws_lb.api[0].dns_name}" : null
+}
+
+output "ecs_service_names" {
+  description = "ECS service names (empty while compute is paused)"
+  value       = { for k, s in { api = aws_ecs_service.api, worker = aws_ecs_service.worker } : k => s[0].name if length(s) > 0 }
+}
