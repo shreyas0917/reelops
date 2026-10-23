@@ -42,7 +42,7 @@ COPY app/requirements-dev.txt /tmp/requirements-dev.txt
 RUN pip install --no-cache-dir -r /tmp/requirements-dev.txt && pip check
 COPY app/reelops_api/ ./reelops_api/
 COPY app/tests/ ./tests/
-USER app
+USER 10001:10001
 CMD ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider"]
 
 # ---- runtime: deps + app code (last stage = default build target) ------------
@@ -50,7 +50,7 @@ FROM deps AS runtime
 COPY app/reelops_api/ ./reelops_api/
 COPY --from=frontend /fe/dist/ ./static/
 ENV REELOPS_STATIC_DIR=/app/static
-USER app
+USER 10001:10001
 EXPOSE 8000
 # 0.0.0.0: reachable from outside the container. Exec form: uvicorn gets
 # SIGTERM directly and drains in-flight requests.

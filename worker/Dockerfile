@@ -46,11 +46,11 @@ COPY requirements-dev.txt /tmp/requirements-dev.txt
 RUN pip install --no-cache-dir -r /tmp/requirements-dev.txt
 COPY reelops_worker/ ./reelops_worker/
 COPY tests/ ./tests/
-USER app
+USER 10001:10001
 CMD ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider"]
 
 # ---- runtime: deps + app code (last stage = default build target) ----------
 FROM deps AS runtime
 COPY reelops_worker/ ./reelops_worker/
-USER app
+USER 10001:10001
 ENTRYPOINT ["python", "-m", "reelops_worker"]
