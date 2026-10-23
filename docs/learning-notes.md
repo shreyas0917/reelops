@@ -1351,3 +1351,311 @@ in a temporary worktree, so each commit is a working state.
    repo while still versioning the infrastructure?* Commit the variable
    declarations and a `.tfvars.example`; keep real values in git-ignored tfvars
    locally and in CI secrets/variables (`TF_VAR_*`), or in SSM/Secrets Manager.
+
+---
+
+## Phase 5 — Worker autoscaling on SQS backlog
+
+### Step 1 — Scalable target
+
+**Built:** `autoscaling.tf`: an Application Auto Scaling target for the worker
+service (`ecs:service:DesiredCount`, min 0, max 3), gated by `enable_compute`;
+`lifecycle { ignore_changes = [desired_count] }` on the worker service.
+Plan: 1 to add.
+
+**Why / alternatives:**
+- *ignore_changes:* Terraform and the autoscaler both write `desired_count`.
+  Without it, any later apply would reset the autoscaler's value to the config
+  (stopping busy workers after a scale-out, or starting one after scale-in).
+  Now the config value only applies when the service is created (e.g. resume:
+  one warm worker, scaled in after 10 idle minutes).
+- *Service-linked role:* Application Auto Scaling uses
+  `AWSServiceRoleForApplicationAutoScaling_ECSService`, created on first use.
+- Alternatives: ECS capacity providers (cluster-level, for EC2 capacity), or a
+  custom scaler (e.g. Lambda reading the queue), more code to own.
+
+**Problems:** None. Proved `ignore_changes` by planning a scratch copy with
+`desired_count = 3`: 0 changes to the worker service.
+
+**Interview questions:**
+1. *Why use `ignore_changes = [desired_count]` with ECS service autoscaling?*
+   Both Terraform and Application Auto Scaling set the field; without ignoring
+   it, every apply reverts the autoscaler's decision, causing unnecessary task
+   churn or capacity at the wrong time.
+2. *What does a scalable target define?* The resource and dimension
+   (`ecs:service:DesiredCount`) Application Auto Scaling may change, and the
+   min/max bounds; policies and alarms decide when and by how much.
+
+### Step 2 — Backlog metric and scaling alarms
+
+**Built:** Two CloudWatch alarms in `autoscaling.tf` (gated by
+`enable_compute`), both on metric math `backlog = visible + inflight`
+(`ApproximateNumberOfMessagesVisible` + `...NotVisible`, 60 s, Maximum):
+scale-out at backlog >= 1 for 1 period (missing = notBreaching); scale-in at
+backlog <= 0 for 10 consecutive periods (missing = breaching). Actions are
+attached in Step 3. Plan: 3 to add. The expression was tested against real
+CloudWatch data with `get-metric-data`.
+
+**Why / alternatives:**
+- *In-flight must count:* when a worker takes the last job, "visible" drops to
+  0 while it's still processing; scaling in on visible alone would SIGTERM a
+  busy worker. The real data showed it: the failed `/tmp` job was in flight
+  for 15 minutes with visible = 0.
+- *Maximum, not Average:* an 8 s job still registers 1 for its minute.
+- *Missing data:* SQS stops publishing metrics for inactive queues, so for
+  scale-in "no data" must mean idle (breaching), or the alarm sits in
+  INSUFFICIENT_DATA and the worker never reaches 0; for scale-out, no data must
+  never start tasks (notBreaching).
+- *10 minutes before scale-in* avoids flapping (each scale-from-zero costs a
+  ~26 s cold start).
+- *Caveat:* after long inactivity SQS metrics can take up to ~15 minutes to
+  resume, so the first job after a quiet period may wait for the scale-out
+  alarm. Fixes for later: the API triggers scale-out directly, a custom metric
+  published on job creation, or min 1 during working hours.
+
+**Problems:** None.
+
+**Interview questions:**
+1. *Why scale SQS consumers on visible + in-flight messages rather than visible
+   alone?* Visible messages drop to zero as soon as workers pick them up, while
+   the work is still running; scaling in on that would kill busy workers. The
+   sum is the number of unfinished messages.
+2. *How should `treat_missing_data` be set for alarms on SQS metrics?* Idle
+   queues may stop publishing metrics, so decide per alarm what "no data"
+   means: breaching for scale-to-zero (idle), notBreaching for scale-out and
+   for failure alerts like the DLQ alarm.
+
+### Step 3 — Step scaling policies
+
+**Built:** Two step scaling policies (ExactCapacity) wired to the Step 2
+alarms: scale-out (backlog 1-2 → 1 task, 3-5 → 2, 6+ → 3; cooldown 60 s)
+and scale-in (any value → 0; cooldown 300 s). Plan: 5 to add.
+
+**Why / alternatives:**
+- *Target tracking can't reach zero:* it tracks a per-task metric (CPU,
+  backlog per task); at 0 tasks that metric doesn't exist, so it has no signal
+  to scale out again, and it is designed to keep, not remove, the last task.
+  Step scaling on alarms over the *queue* metric works at 0 tasks.
+- *Step bounds* are relative to the alarm threshold (lower inclusive, upper
+  exclusive): with threshold 1, backlog 1-2 is [0,2), 3-5 is [2,5), 6+ is [5,∞).
+- *Scale-in step bounds (corrected):* I first wrote a single step with no bounds,
+  reasoning that the alarm can be in ALARM on missing data and an unbounded step
+  would always match. The API rejects that ("Both lower and upper bounds of a
+  step adjustment cannot be left unspecified"); the step is now
+  `metric_interval_upper_bound = 0`, i.e. (-inf, 0] relative to the threshold
+  (below the threshold the upper bound is inclusive). Open question for the
+  load test: how the policy behaves when the alarm fires on missing data.
+- *ExactCapacity re-applied every minute while in ALARM* means the scale-out
+  policy also lowers capacity as the backlog shrinks (e.g. 3 → 1). ECS may then
+  stop a busy task (it hands its job back on SIGTERM, but work is lost), so
+  Step 4 adds task scale-in protection.
+- Alternatives: target tracking on a custom "backlog per task" metric for the
+  1..N range plus a separate rule for 0; or KEDA-style scalers on Kubernetes.
+
+**Problems:** None. Checked by text that each alarm points to its own policy
+(the plan shows `alarm_actions` only as "known after apply").
+
+**Interview questions:**
+1. *Why can't ECS target tracking scale a service to zero and back?* Target
+   tracking needs a per-task metric; with no tasks there's no metric (CPU) or
+   it's undefined (backlog ÷ 0 tasks), so nothing triggers a scale-out from 0.
+   Use step scaling on a queue-level alarm instead.
+2. *What does a step scaling cooldown do?* After a scaling activity it blocks
+   further activity from that policy (for scale-out, smaller or equal
+   adjustments) for the cooldown period, so new tasks have time to start and
+   affect the metric before the policy acts again.
+
+### Step 4 — Task scale-in protection
+
+**Built:** `worker/reelops_worker/protection.py`: the worker PUTs
+`$ECS_AGENT_URI/task-protection/v1/state` (`ProtectionEnabled`, 60-minute
+expiry) right after claiming a job and clears it on every exit path (done,
+failed, retry, lost lease, SIGTERM hand-back); best-effort, disabled without
+`ECS_AGENT_URI`. IAM: `ecs:UpdateTaskProtection` on
+`task/reelops-dev/*` only. Tests: a fake agent HTTP server on loopback
+(15 new tests; 71 total). Committed locally, pushed `reelops-worker:028d3a5`.
+
+**Why / alternatives:**
+- *Why:* with ExactCapacity re-applied every minute, capacity follows the
+  backlog down (3 → 1); without protection ECS may stop a busy task, wasting
+  its work (it hands the job back on SIGTERM). Protected tasks are skipped by
+  scale-in and wait during deployments.
+- *Expiry as a safety net:* a worker that dies holding protection doesn't pin
+  its task forever. Long jobs could renew it from the heartbeat (future).
+- *Best-effort:* protection must never be the reason a job fails.
+- *IAM:* the agent calls the ECS API with the task role, so the task role needs
+  `ecs:UpdateTaskProtection`; we never read protection, so no
+  `ecs:GetTaskProtection`. Simulator 7/7; real confirmation in the load test.
+- Alternatives: a longer scale-in interval only (doesn't protect busy tasks),
+  or a queue-per-worker design (complex).
+
+**Problems:** None. A mutation check (removing the `protected()` wrapper)
+made 3 of 4 consumer protection tests fail, so they guard the behaviour.
+Committed the worker change before pushing because `push_images.sh` refuses a
+dirty `worker/` (the SHA tag must describe the code); GitHub push still waits
+for Step 8. The scan-polling loop in `push_images.sh` ran for real this time.
+
+**Interview questions:**
+1. *How do you stop ECS from killing a busy worker during scale-in?* Use ECS
+   task scale-in protection: the task sets protection through the agent
+   endpoint while it has work and clears it after; scale-in only stops
+   unprotected tasks. Give the task role `ecs:UpdateTaskProtection` and set an
+   expiry as a safety net.
+2. *Why make a side concern like task protection best-effort?* It improves
+   efficiency but isn't required for correctness (jobs are already safe to hand
+   back), so a failure should log a warning, not fail the job.
+
+### Step 5 — CloudWatch dashboard
+
+**Built:** `dashboard.tf`: dashboard `reelops-dev` (gated by `enable_compute`)
+with 6 widgets: jobs backlog (visible + in flight, threshold line), worker
+tasks running, DLQ depth, API 5xx (target and ALB), API target response time
+(p50/p99), worker CPU (avg/max). Output `dashboard_url`. Free tier (3
+dashboards, 50 metrics each); this one uses 11 metrics.
+
+**Why / alternatives:**
+- *Running tasks without Container Insights:* `RunningTaskCount` needs
+  Insights (billed). The `SampleCount` of the service's `CPUUtilization` is one
+  per running task per minute; verified against history (exactly 2 during the
+  minutes two worker tasks overlapped in a deployment, 1 otherwise).
+  `FILL(…, 0)` turns "no tasks, no data" into a visible 0.
+- *Desired count* isn't published as a metric without Insights; the load test
+  reads it from the ECS API.
+- Alternatives: Container Insights (per-task detail, cost), Grafana/Prometheus
+  (more to run), or embedding these graphs in the README via snapshots.
+
+**Problems:** None. Metric math expressions checked with `get-metric-data`
+before apply (CloudWatch has no validate-only API for dashboards).
+
+**Interview questions:**
+1. *How can you count running ECS tasks without Container Insights?* Use the
+   `SampleCount` statistic of the service's `CPUUtilization` (one sample per task
+   per period), or read `runningCount` from `DescribeServices`; wrap the metric
+   with `FILL(m, 0)` so zero tasks shows as 0 instead of a gap.
+2. *What belongs on an operations dashboard for a queue-driven worker?* The
+   scaling signal (backlog incl. in-flight), capacity (running tasks), failures
+   (DLQ depth, 5xx), latency (response time p50/p99) and saturation (CPU), so
+   you can see cause and effect together.
+
+### Step 6 — Phase 5 plan
+
+**Built:** Saved plan `phase5.tfplan`: 7 to add (scalable target, 2 step
+policies, 2 backlog alarms, dashboard), 2 in place (worker service: only
+`task_definition` → new revision; worker task role policy: adds
+`ecs:UpdateTaskProtection`), 1 replace (worker task definition, image
+`41abfb9` → `028d3a5`; the "destroy" deregisters revision 2). 52 resources
+unchanged, including the API, ALB and data layer.
+
+**Why / alternatives:** The plan JSON's `after_unknown` explained an update with
+"no changed attributes": the new task definition ARN is only known after
+apply. Expected after apply: the worker rolls to revision 3; with an empty
+queue the scale-in alarm reaches ALARM after 10 minutes and the service goes to
+0. Pause now removes 11 resources (5 compute + target, 2 policies, 2 alarms,
+dashboard). Cost: alarms fit the free tier (10 alarm metrics), dashboard free,
+Application Auto Scaling free; an idle worker now costs nothing.
+
+**Problems:** The apply partly failed: the scale-in policy was rejected with
+"ValidationException: Both lower and upper bounds of a step adjustment cannot be
+left unspecified", so its alarm (which references the policy) wasn't created
+either; everything else was. My Step 3 claim that a single unbounded step was
+allowed was wrong, and `terraform validate`/`plan` can't catch it (the provider
+accepts it; only the AWS API rejects it). Fixed with
+`metric_interval_upper_bound = 0`. A saved plan can't be reused after a partial
+apply (state changed), so the stale `phase5.tfplan` was deleted and a fresh
+plan made: 2 to add, 0 to change, 0 to destroy. Meanwhile the worker simply
+stayed at desired 1 (scale-out policy present, no scale-in).
+
+**Interview questions:**
+1. *A Terraform plan shows a resource "updated in-place" but no attribute
+   changes. Why?* The changed value is unknown until apply (e.g. a new ARN from
+   a replaced dependency), so it appears as "(known after apply)"; in the JSON
+   plan it's listed in `after_unknown`, not `after`.
+2. *What happens to an ECS service's running tasks when its task definition
+   changes?* ECS starts a rolling deployment to the new revision (within
+   min/max healthy percent), replacing tasks; with scale-in protection, a
+   protected task isn't replaced until its protection is cleared or expires.
+
+### Step 7 — Load test: scale from 0 and back
+
+**Built:** `scripts/load_test.sh` (submit N jobs through the ALB, sample queue
+and task counts every 15 s to `samples/output/scaling.csv`, then compute exact
+timings from ECS task timestamps, job `updated_at` and Application Auto Scaling
+activities; `DRY_RUN=1` mode) and `scripts/plot_scaling.py` (chart, run with
+matplotlib in a throwaway container). Results for 8 jobs on an idle stack
+(first upload 16:13:42 UTC): all 8 done on the first attempt, 0 failed.
+- *Cold start from 0:* 201.7 s from first upload to first worker task started.
+- *Peak:* 3 running tasks at +204.5 s (scaled 0 → 3 in one step: backlog 8
+  is in the 6+ band).
+- *All jobs finished:* +233.0 s (about 30 s after the workers started).
+- *Queue empty → desired 0:* 707.6 s; tasks fully stopped ~40 s later.
+- *Task protection works on AWS:* 8 "task protection on" / 8 "off" log lines,
+  one pair per job across the 3 tasks, no AccessDenied (the simulator couldn't
+  prove ECS accepts the `task/reelops-dev/*` resource scoping; this did).
+
+**Why / alternatives:** *Where the scale-from-zero latency goes* (exact
+timestamps): SQS metric publication + alarm evaluation 166.8 s (83%: uploads at
+16:13:42 first appear in the 16:14 data point, which the alarm acted on at
+16:16:28), ECS scheduling 11 s, Fargate provisioning + image pull + start 24 s.
+So **most of the latency is the SQS → CloudWatch metric delay, not Fargate
+start-up**; a smaller image would save seconds, the metric path saves minutes.
+Options: the API publishes a high-resolution custom metric or nudges the
+service's desired count when it creates a job while the worker is at 0;
+scheduled scaling to keep 1 warm worker during working hours; or an
+event-driven trigger (EventBridge Pipes/Lambda on the queue). The 10-minute
+scale-in window also keeps 3 idle tasks for ~12 minutes after a burst (about
+$0.06), the price of not flapping.
+
+**Problems:**
+- *The user's run stalled* at 16:25:34 (CSV stopped growing; API, ECS and IP
+  all fine, so the script process in the terminal stopped advancing) and never
+  wrote its report. No second run: the four measurements were computed from
+  AWS records with the script's own report code, and the chart's tail (after
+  16:25:34) was reconstructed from ECS/App Auto Scaling records into
+  `scaling_full.csv` and shaded in the PNG. Hardening: `curl` timeouts and a
+  tmux/nohup note.
+- *I overwrote the user's `scaling.csv`* with a `DRY_RUN` check (dry run
+  started a fresh CSV). Restored all 43 rows exactly from `scaling_full.csv`;
+  dry runs now write `scaling_dryrun.csv`.
+- My `python -I` in the plot container ignored the `pip --user` install.
+- Not exercised: stepping down 3 → 2 → 1 while busy (all 8 jobs finished within
+  ~30 s, faster than the ~2.5-minute metric loop), so the case protection most
+  matters for didn't occur; protection on/off itself was proven.
+
+**Interview questions:**
+1. *Your queue-based autoscaler takes 3 minutes to start the first worker. Where
+   does the time go and how do you cut it?* Measure each segment with exact
+   timestamps: here 83% was SQS metrics reaching CloudWatch and the alarm
+   evaluating, not container start. Cut it by signalling scale-out directly
+   (custom high-resolution metric or an UpdateService/desired-count nudge from
+   the producer), keeping a warm minimum during busy hours, or event-driven
+   triggers; image size and Fargate start-up are second-order.
+2. *How do you load-test autoscaling credibly?* Start from a known idle state,
+   generate a burst, sample queue depth and desired/running counts, and compute
+   the key intervals (time to first worker, peak, drain time, time back to
+   zero) from authoritative timestamps (task start/stop, scaling activities,
+   job completion) rather than from coarse polling.
+
+### Step 8 — Commit and push
+
+**Built:** Conventional Commits for Phase 5, one per step, with the scale-in
+step bound as its own `fix:` commit; the worker task-protection commit (made
+locally in Step 4 so the image tag matched committed code) went out in the
+same push. Not committed: `samples/output/` (CSV, report), `*.tfplan`,
+`images.auto.tfvars`, `terraform.tfvars`.
+
+**Why / alternatives:** `autoscaling.tf` changed in Steps 1, 2, 3 and in the
+fix, so each commit stages that step's version (rebuilt from the final file)
+and every intermediate commit is checked with `terraform validate`; note that
+`validate` passes even for the pre-fix scale-in step, because only the AWS API
+rejects it.
+
+**Problems:** None.
+
+**Interview questions:**
+1. *Why commit before building an image whose tag is the commit SHA?* So the
+   tag identifies exactly the code inside the image; building from uncommitted
+   changes would make the tag lie and break traceability and rollbacks.
+2. *Can `terraform validate` and `plan` catch every invalid configuration?* No:
+   they check syntax, types and provider-side schema; many constraints are
+   enforced only by the cloud API at apply time (like Application Auto
+   Scaling's step bounds), so applies can still fail partway.
