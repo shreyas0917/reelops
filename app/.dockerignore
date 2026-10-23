@@ -1,0 +1,7 @@
+# Keep the build context small and stop stray files from busting the COPY cache.
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+.venv/
+Dockerfile
+.dockerignore
