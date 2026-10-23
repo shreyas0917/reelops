@@ -103,15 +103,24 @@ resource "aws_s3_bucket_lifecycle_configuration" "media" {
   }
 }
 
-# Lets browser JavaScript on allowed origins PUT/GET with presigned URLs
-# (Phase 6). CORS is browser-enforced; authorization is still the presigned
-# URL's signature, and the bucket stays private.
+# Lets browser JavaScript on allowed origins PUT/GET with presigned URLs.
+# CORS is browser-enforced; authorization is still the presigned URL's
+# signature, and the bucket stays private. The UI is served by the API behind
+# the ALB, so the ALB's own origin is added while compute runs; it follows the
+# ALB's new DNS name across pause/resume.
+locals {
+  cors_origins = concat(
+    var.allowed_origins,
+    var.enable_compute ? ["http://${aws_lb.api[0].dns_name}"] : [],
+  )
+}
+
 resource "aws_s3_bucket_cors_configuration" "media" {
   bucket = aws_s3_bucket.media.id
 
   cors_rule {
     allowed_methods = ["PUT", "GET"]
-    allowed_origins = var.allowed_origins
+    allowed_origins = local.cors_origins
     # What a presigned PUT sends, including SDK checksum headers.
     allowed_headers = ["content-type", "x-amz-*"]
     # Readable by browser JS; needed for multipart uploads.
