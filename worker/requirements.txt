@@ -1,0 +1,4 @@
+# Runtime dependencies for the ReelOps worker (python:3.12-slim).
+# Direct dependencies are pinned exactly; bump deliberately and rebuild.
+faster-whisper==1.2.1
+boto3==1.43.111
