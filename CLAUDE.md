@@ -15,6 +15,10 @@ This is a learning/portfolio DevOps project.
 
 - I am learning: explain what and why before writing code or creating a file.
 - Work in small steps. After each step, give me a command to verify it worked.
+- At the end of every step, append an entry to `docs/learning-notes.md`:
+  what we built (2-3 lines); why this way and the alternatives; problems hit
+  and how we fixed them; 2 likely interview questions with short answers.
+  Commit the notes with each phase.
 
 ## Terraform
 
