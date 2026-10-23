@@ -1,0 +1,24 @@
+# Accepted vulnerabilities for the Trivy CI gate (fail on CRITICAL).
+# Every entry needs a reason and an expiry: after expired_at Trivy reports it
+# again and CI fails, forcing a re-check. Prefer fixing over adding entries.
+# No `paths:` filters: OS-package findings carry no file path, so a path
+# filter would silently never match.
+# Reviewed 2026-10-23: Debian 13 has no fixed package for either CVE yet; the
+# pinned python:3.12-slim digest is the newest and `apt-get upgrade` changes
+# nothing. Re-check when Dependabot proposes a new base digest.
+vulnerabilities:
+  - id: CVE-2026-6653
+    statement: >-
+      libxml2 in the worker image (pulled in by Debian's ffmpeg). No fixed Debian
+      package yet. The reachable path from user uploads was ffmpeg's DASH demuxer
+      (an XML manifest disguised as .mp4); the worker now opens uploads with
+      -format_whitelist mov,mp4,...,matroska,webm, so DASH and libxml2 are not
+      reachable from uploads (tested in worker/tests/test_audio.py).
+    expired_at: 2026-11-22
+  - id: CVE-2026-111497
+    statement: >-
+      libbrotli1 in the worker image (used by FreeType for WOFF2 fonts, via
+      libass). No fixed Debian package yet. libass only loads the DejaVu TTF
+      fonts installed in the image; uploads never supply fonts, so the brotli
+      decoder isn't reachable from user input.
+    expired_at: 2026-11-22
