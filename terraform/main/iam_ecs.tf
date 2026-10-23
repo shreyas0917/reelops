@@ -121,6 +121,15 @@ data "aws_iam_policy_document" "worker_task" {
     resources = [aws_dynamodb_table.jobs.arn]
   }
 
+  # Task scale-in protection while holding a job. The worker calls the ECS
+  # agent endpoint, and the agent makes this API call with the task role.
+  # Only set (never read) protection, only for tasks in our cluster.
+  statement {
+    sid       = "TaskScaleInProtection"
+    actions   = ["ecs:UpdateTaskProtection"]
+    resources = ["arn:aws:ecs:ap-south-1:${local.account_id}:task/${aws_ecs_cluster.main.name}/*"]
+  }
+
   # Resource "*" is unavoidable: DescribeVoices has no resource ARN, and
   # SynthesizeSpeech can only be scoped to lexicons, which we don't use.
   # Narrowed to our region instead.
