@@ -651,3 +651,283 @@ completed right after and the Step 6 entry updated.
    still available to CI?* Git-ignored `terraform.tfvars` locally; in CI,
    `TF_VAR_<name>` environment variables from encrypted secrets (GitHub Actions
    secrets or variables), or values read from SSM Parameter Store.
+
+---
+
+## Phase 3 — Queue-driven pipeline (local, against real AWS)
+
+### Step 1 — API
+
+**Built:** `app/`: a FastAPI service (python:3.12-slim, non-root, pinned deps,
+256 MB image). `POST /jobs` validates type and size, writes a `pending` item
+(conditioned on `attribute_not_exists(job_id)`) and returns a 15-minute
+presigned PUT bound to the Content-Type. `GET /jobs/{id}` returns status,
+adding a presigned GET (attachment) when done. `GET /healthz` is liveness only.
+
+**Why / alternatives:**
+- *Presigned URLs* keep video bytes out of the API: the browser uploads
+  straight to S3, so API tasks stay small, there's no double data transfer, and
+  scaling follows request count, not upload size. Clients never get AWS
+  credentials, only one URL for one action on one object for 15 minutes.
+  Alternative: stream uploads through the API (simple, but heavy and slow).
+- *Size* can't be enforced by a presigned PUT; the worker re-checks the real
+  object size. Production upgrade: presigned POST with `content-length-range`.
+- *Regional virtual-hosted S3 endpoint + SigV4*: the global endpoint may
+  307-redirect, and browsers fail CORS preflights on redirects.
+- *App factory + injected clients*, mirroring the worker, so moto can stand in
+  for AWS in tests. Sync `def` routes because boto3 blocks (FastAPI runs them
+  in a thread pool).
+- `/healthz` makes no AWS calls: a DynamoDB blip shouldn't make the load
+  balancer kill every task.
+
+**Problems:** None. Verified against the real bucket and table without side
+effects: a PUT with the wrong Content-Type got `403 SignatureDoesNotMatch` and
+created no object (so no S3 event reached the queue); the test job item was
+deleted afterwards. Note: with instance-role credentials the URL embeds a
+session token and stops working at 15 minutes or at credential expiry,
+whichever is first.
+
+**Interview questions:**
+1. *Why use presigned URLs for uploads instead of uploading through your API?*
+   The API never handles the bytes: it hands out a short-lived URL scoped to one
+   object and Content-Type, and the client uploads straight to S3. That avoids
+   large request bodies, long timeouts, double bandwidth and API scaling driven
+   by upload volume, and no AWS credentials ever reach the client.
+2. *Can a presigned PUT limit the upload size?* No; it signs the method, key and
+   chosen headers, not a size range. Use presigned POST with a
+   `content-length-range` policy condition, and still validate size server-side
+   (here, the worker checks the object size from the S3 event).
+
+### Step 2 — Worker queue consumer
+
+**Built:** `worker/reelops_worker/consumer.py`, run with
+`python -m reelops_worker consume` (same image; the CLI still works). It loads
+Whisper once, long-polls SQS one message at a time, ignores `s3:TestEvent`,
+URL-decodes keys, claims jobs with a conditional DynamoDB update, heartbeats
+(visibility + lease) every 60 s, uploads `output/<job_id>.mp4`, sets `done`
+and only then deletes the message. SIGTERM stops intake and gives a running
+job 20 s before handing it back.
+
+**Why / alternatives:**
+- *Delete last:* the SQS message is the job's retry ticket; deleting before
+  the result is durable turns a crash into a lost job. Worst case with delete
+  last is duplicate work, made harmless by the claim rules and a deterministic
+  output key (at-least-once + idempotency).
+- *Claim-failure cases:* `done` → duplicate event, delete; `processing` with
+  a fresh lease → another live worker holds its own message, delete; `failed`
+  → terminal, delete; `pending` → raced, leave for retry.
+- *URL-decoding (`unquote_plus`):* S3 event keys are form-encoded (space →
+  `+`); using them raw gives NoSuchKey for any filename with spaces or
+  non-ASCII characters.
+- *Owner-conditioned writes* (`worker_id = me AND status = processing`) stop a
+  stalled worker overwriting the state of the worker that took over.
+- *Graceful shutdown:* ECS sends SIGTERM, waits the stop timeout (default
+  30 s), then SIGKILL. Without handling, a killed job waits ~5 min for its lease
+  and visibility to expire; with it, the job finishes or is handed back at once
+  (status `pending`, message visibility 0). `signal.alarm` raises `Shutdown`,
+  which unwinds the pipeline (`subprocess.run` kills ffmpeg, temp files are
+  removed).
+- Alternatives: Celery or RQ (more machinery, needs a broker), Step Functions
+  (managed orchestration, more cost), Lambda (15-minute and size limits awkward
+  for ffmpeg and model loading).
+
+**Problems:**
+- *A race in the spec:* lease 300 s = visibility 300 s means a dead worker's
+  message can reappear at the same instant its lease goes stale; if received a
+  moment early, the redelivery looks like a duplicate, gets deleted, and the job
+  is stuck in `processing` forever. Fixed by lease = 240 s (visibility −
+  heartbeat interval), enforced in `config.py` as
+  `heartbeat < lease < visibility`.
+- *Unexpected errors* would leave a fresh lease and hit the same race on retry,
+  so the worker releases the claim (`pending`), or marks `failed` on the final
+  receive, so the API shows the failure while the message goes to the DLQ.
+- Testing gotcha: `cmd | tail` reports tail's exit code; checked the container's
+  real exit code (2 for missing settings) separately.
+
+**Interview questions:**
+1. *Why delete the SQS message only after processing succeeds?* The message is
+   the only thing that guarantees a retry. Ack-after-commit means any crash
+   leads to redelivery (at-least-once). Then make processing idempotent: claim
+   with a conditional write, deterministic output keys, skip already-done jobs.
+2. *How should a queue worker handle SIGTERM on ECS/Kubernetes?* Stop pulling
+   new work, finish the current item within the stop timeout or hand it back
+   (release the claim, set message visibility to 0), then exit 0. Run the
+   process as PID 1 with an exec-form entrypoint so it actually receives the
+   signal.
+
+### Step 3 — Tests with moto
+
+**Built:** moto-based tests run in both test images with `--network none`:
+11 API tests (create/get, presigned URL shape, validation, done → attachment
+download, failed, 404/422, expired) and 21 new consumer tests (claim rules,
+TestEvent, URL-decoded keys, unknown/too-large, PipelineError, retry and final
+attempt, lost lease, SIGTERM hand-back, heartbeat). Worker total: 55; API: 11.
+
+**Why / alternatives:**
+- *moto* fakes S3/SQS/DynamoDB in memory behind boto3, so the real calls run,
+  including `ConditionExpression`, receipt handles and visibility changes,
+  with no network or credentials (works offline and in CI). Alternatives:
+  `botocore.Stubber` (you script every response: tests your script, not
+  behaviour) or LocalStack (a container, closer to real AWS but heavier).
+- *Fake credentials + `AWS_EC2_METADATA_DISABLED`* set in `conftest.py` before
+  boto3 loads: otherwise boto3 hangs on IMDS without a network, or worse, finds
+  the dev box's real role.
+- *Controllable clock:* lease ages are exact (240 s = fresh, 241 s = stale) with
+  no sleeping; the edge case `claimed_at == now - 240` is tested explicitly.
+- *Fake pipeline:* consumer tests check decisions, not ffmpeg/Whisper, which
+  have their own tests; fakes also inject failures (PipelineError,
+  RuntimeError, Shutdown, a lease stolen mid-render).
+
+**Problems:** None failing. A deprecation warning: Starlette's TestClient now
+prefers `httpx2` over `httpx`; harmless, to fix at the next dependency bump.
+
+**Interview questions:**
+1. *How do you test code that depends on SQS and DynamoDB without AWS?* Inject
+   the clients and use moto to emulate the services in memory, so real API calls
+   (conditional writes, deletes by receipt handle) execute. Disable real
+   credential lookup in tests so nothing can reach a real account.
+2. *How do you test time-dependent logic like leases?* Inject a clock instead
+   of calling `time.time()` directly, set it to exact values, and test both sides
+   of each boundary. Keep only one short real-time test for the threaded
+   heartbeat.
+
+### Step 4 — Docker Compose and .env from Terraform
+
+**Built:** `scripts/env_from_tf.sh` writes a git-ignored, `chmod 600` `.env`
+(region, bucket, table, queue URL) from `terraform output`, atomically.
+`docker-compose.yml` runs `api` (healthcheck on `/healthz`, published on
+`127.0.0.1:8000`) and `worker` (`command: consume`, 30 s stop grace period).
+Both get credentials from the instance role (`iam-role`), with no keys anywhere.
+
+**Why / alternatives:**
+- *Generate config from Terraform outputs* so it can't drift from what exists;
+  alternatives: hand-edited `.env` (drifts), or SSM Parameter Store read at
+  startup (the Phase 4+ cloud equivalent).
+- *Localhost-only port:* Docker-published ports go on all interfaces and
+  Docker's iptables rules bypass `ufw`, so `8000:8000` would expose the API if
+  the security group ever allowed it. Reach it from Windows with VS Code port
+  forwarding.
+- `stop_grace_period: 30s` mirrors ECS's default stopTimeout, so `docker compose
+  stop` rehearses a Fargate task stop. It must exceed the worker's 20 s job
+  grace period.
+- *Healthcheck via Python's urllib* because slim images have no `curl`; same
+  probe as the Phase 4 load balancer.
+
+**Problems:** None. A `git status | grep env` false alarm matched the new
+script, not `.env`; `--untracked-files=all` confirmed `.env` is ignored.
+
+**Interview questions:**
+1. *Why bind a published container port to 127.0.0.1?* Docker publishes on
+   0.0.0.0 by default and inserts iptables rules ahead of host firewalls like
+   ufw, so a container port can be reachable from the internet even when the
+   host firewall "blocks" it. Bind to localhost and tunnel, or rely on a
+   security group that doesn't open the port.
+2. *How do containers on an EC2 instance get AWS credentials without keys?*
+   Through the instance role via IMDSv2. The hop limit must be 2 so the token
+   response survives the extra hop across the Docker bridge network. On ECS the
+   task role is used instead.
+
+### Bug fix — SIGTERM lost during worker startup (found after Step 4)
+
+**Built:** An early SIGTERM/SIGINT handler in `__main__` (installed before the
+heavy imports and model load) that sets a shared `threading.Event` the
+consumer then uses as its stop flag; `init: true` on the compose worker; a
+subprocess regression test. Planned for Phase 4: `initProcessEnabled = true`
+in the worker's ECS task definition (`linuxParameters`).
+
+**Why / alternatives:**
+- *Root cause:* the kernel doesn't deliver a signal to a PID namespace's PID 1
+  unless it has a handler (protection for init). Python handles SIGINT by
+  default but not SIGTERM, and our handler was installed only after ~1-2 s of
+  imports and model loading. A SIGTERM in that window was dropped; Docker
+  doesn't resend, so it waited the 30 s grace period and SIGKILLed (exit 137)
+  a worker that had meanwhile started polling.
+- *Two layers:* (1) handle the signal as early as possible, and carry the
+  "stop requested" state into the consumer rather than losing it;
+  (2) run an init (tini via `init: true`, or ECS `initProcessEnabled`) as
+  PID 1, which forwards signals (the child, not being PID 1, dies by default
+  even before a handler exists) and reaps orphaned processes such as ffmpeg.
+- Alternatives: `exec` form plus `STOPSIGNAL SIGINT` (Python handles SIGINT by
+  default; hacky), or a tini `ENTRYPOINT` baked into the image (works
+  everywhere, but duplicates what compose/ECS provide).
+
+**Problems:**
+- Reproduced first, as reported: stop 0.5 s after start took 30.3 s, exit 137,
+  and the log showed the worker went on to poll. After the fix: 0.3 s, exit 0,
+  both with Python as PID 1 (no init) and with `init: true`.
+- My first version of the test unpacked `communicate()` as (stderr, stdout)
+  instead of (stdout, stderr). Verified the fixed test fails (return code -15)
+  on a copy with the early handler removed, so it really guards the bug.
+- An idle stop still takes up to ~20 s: the worker finishes the current long
+  poll. Expected, and within the 30 s grace period.
+
+**Interview questions:**
+1. *Why might a container ignore `docker stop` and only die after the timeout?*
+   Its main process is PID 1, which only receives signals it has a handler for;
+   if it hasn't installed a SIGTERM handler (yet), or a shell wrapper is PID 1
+   and doesn't forward signals, SIGTERM is dropped and Docker SIGKILLs after
+   the grace period. Fix with exec-form entrypoints, early signal handlers and
+   an init process (tini / `--init` / ECS `initProcessEnabled`).
+2. *What does an init process like tini do in a container?* It runs as PID 1,
+   forwards signals to the child process, and reaps zombie processes (orphans
+   re-parented to PID 1), which a normal application doesn't do.
+
+### Step 5 — End-to-end through the queue
+
+**Built:** `scripts/e2e.sh`: `POST /jobs` → `curl` PUT to the presigned URL →
+poll `GET /jobs/{id}` → download the output → re-send the same S3 event by hand
+and check the worker logs "duplicate skipped" and the job stays `done` with
+`attempts` unchanged. Run on `samples/synthetic.mp4`: create 0.1 s, upload
+0.1 s, queue + processing 14.5 s (pending → processing in ~2 s, done at
+14.5 s), download 0.1 s, total 14.8 s; duplicate handled in 0.8 s. Both queues
+empty afterwards.
+
+**Why / alternatives:** The script uses only HTTP and curl on the client side,
+exactly what the Phase 6 browser will do, so it tests the real contract (the
+presigned URL's signed Content-Type and the attachment
+download; curl ignores CORS, so the bucket's CORS rules are only tested by the
+browser in Phase 6). The duplicate is injected by rebuilding S3's event JSON, which
+proves idempotency against at-least-once delivery without waiting for a real
+duplicate. Alternatives: a pytest integration suite against the dev stack
+(better for CI later), or testing through the browser (Phase 6).
+
+**Problems:** None in this step. Processing took ~14 s vs ~11.5 s in Phase 1's
+CLI run: the consumer adds an S3 download and upload plus the poll interval,
+and the first stage timings include warm-up.
+
+**Interview questions:**
+1. *How do you prove a queue consumer is idempotent?* Inject a duplicate of a
+   real message after the job completes and assert nothing changes: no second
+   run (attempts unchanged), status still done, message deleted, and a log line
+   that says why it was skipped.
+2. *Why poll for job status instead of holding the HTTP request open until the
+   video is ready?* Processing takes seconds to minutes; long-held requests tie
+   up connections and break at load balancer and browser timeouts. Async job +
+   status endpoint (or later WebSockets/SSE or a notification) decouples
+   request time from processing time.
+
+### Step 6 — Commit and push
+
+**Built:** Conventional Commits for Phase 3, one per working step, with the
+startup-SIGTERM bug as its own `fix:` commit, pushed to `main`. `.env` (account
+ID in the queue URL and bucket name) stays uncommitted via `.gitignore`.
+Before committing, `e2e.sh` gained a 60 s wait for `/healthz` and the usage
+hints now say `docker compose up -d --build --wait`; verified by running
+`e2e.sh` immediately after a plain `up`.
+
+**Why / alternatives:** Keeping the bug fix separate makes the history tell
+the true story (feature, then the bug found by testing, then the fix), and lets
+the fix be reviewed or reverted on its own. Files touched by both were staged
+at their pre-fix content with `git hash-object` + `update-index`, as before.
+
+**Problems:** None.
+
+**Interview questions:**
+1. *Why make scripts wait for health instead of sleeping a fixed time?* Start-up
+   time varies (image pulls, model loading); a fixed sleep is either too short
+   (flaky) or too long (slow). Poll a readiness endpoint with a timeout, or use
+   `docker compose up --wait`, which waits for healthchecks.
+2. *What's the difference between `docker compose up --wait` and a healthcheck?*
+   The healthcheck defines how Docker judges a container healthy; `--wait`
+   makes the `up` command block until services are healthy (or just running,
+   for services without a healthcheck).
