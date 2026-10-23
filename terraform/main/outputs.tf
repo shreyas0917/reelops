@@ -55,3 +55,8 @@ output "ecs_service_names" {
   description = "ECS service names (empty while compute is paused)"
   value       = { for k, s in { api = aws_ecs_service.api, worker = aws_ecs_service.worker } : k => s[0].name if length(s) > 0 }
 }
+
+output "dashboard_url" {
+  description = "CloudWatch dashboard (null while compute is paused)"
+  value       = var.enable_compute ? "https://ap-south-1.console.aws.amazon.com/cloudwatch/home?region=ap-south-1#dashboards/dashboard/${aws_cloudwatch_dashboard.main[0].dashboard_name}" : null
+}
