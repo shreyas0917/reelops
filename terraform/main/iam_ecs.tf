@@ -105,10 +105,12 @@ data "aws_iam_policy_document" "worker_task" {
     resources = ["${aws_s3_bucket.media.arn}/raw/*"]
   }
 
-  # Upload the result; s3:PutObject also covers multipart uploads.
+  # Upload the result. s3:PutObject covers multipart uploads; boto3's
+  # upload_file also aborts a failed multipart upload, which needs its own
+  # permission (the bucket lifecycle cleans up after 1 day only as a backstop).
   statement {
     sid       = "WriteOutputs"
-    actions   = ["s3:PutObject"]
+    actions   = ["s3:PutObject", "s3:AbortMultipartUpload"]
     resources = ["${aws_s3_bucket.media.arn}/output/*"]
   }
 
