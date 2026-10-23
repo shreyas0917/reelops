@@ -1,0 +1,36 @@
+# Local stack against the real AWS resources from terraform/main.
+#
+#   scripts/env_from_tf.sh        # writes .env from terraform output
+#   docker compose up -d --build
+#   docker compose logs -f worker
+#
+# No credentials here: containers use the EC2 instance role via IMDS.
+name: reelops
+
+services:
+  api:
+    build: ./app
+    image: reelops-api:dev
+    env_file: .env
+    # Localhost only: Docker-published ports bypass ufw, and this API hands out
+    # upload URLs. Reach it from Windows via VS Code's Ports panel (forward 8000).
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      # Same probe as the Phase 4 load balancer. No curl in the slim image.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+  worker:
+    build: ./worker
+    image: reelops-worker:dev
+    command: ["consume"]
+    env_file: .env
+    # Like ECS: SIGTERM, then SIGKILL after 30 s (default stopTimeout). Longer
+    # than the worker's 20 s job grace period, so it can hand a job back first.
+    stop_grace_period: 30s
+    restart: unless-stopped
