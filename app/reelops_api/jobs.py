@@ -101,7 +101,7 @@ def _plain(value):
 
 
 def get_job(job_id: str, *, settings: Settings, table, s3) -> dict:
-    """Return job status; adds a presigned download URL once the job is done."""
+    """Return job status; adds presigned download and preview URLs once done."""
     # Consistent read: a poller sees "done" as soon as the worker writes it.
     item = table.get_item(Key={"job_id": job_id}, ConsistentRead=True).get("Item")
     # TTL deletion is lazy, so treat expired items as already gone.
@@ -116,16 +116,23 @@ def get_job(job_id: str, *, settings: Settings, table, s3) -> dict:
         "created_at": _plain(item["created_at"]),
         "updated_at": _plain(item["updated_at"]),
         "download_url": None,
+        "preview_url": None,
     }
     if job["status"] == "done":
-        job["download_url"] = s3.generate_presigned_url(
-            "get_object",
-            Params={
-                "Bucket": settings.media_bucket,
-                "Key": output_key(job_id),
-                # Browser saves the file instead of playing it in the tab.
-                "ResponseContentDisposition": f'attachment; filename="reelops-{job_id}.mp4"',
-            },
-            ExpiresIn=settings.url_expiry_seconds,
-        )
+        # Same object, two signed links: the disposition is part of the
+        # signature. attachment = browser saves it; inline = <video> plays it.
+        job["download_url"] = _signed_output_url(job_id, "attachment", settings, s3)
+        job["preview_url"] = _signed_output_url(job_id, "inline", settings, s3)
     return job
+
+
+def _signed_output_url(job_id: str, disposition: str, settings: Settings, s3) -> str:
+    return s3.generate_presigned_url(
+        "get_object",
+        Params={
+            "Bucket": settings.media_bucket,
+            "Key": output_key(job_id),
+            "ResponseContentDisposition": f'{disposition}; filename="reelops-{job_id}.mp4"',
+        },
+        ExpiresIn=settings.url_expiry_seconds,
+    )

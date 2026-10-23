@@ -61,6 +61,7 @@ def test_get_pending_job_has_no_download_url(client):
     body = client.get(f"/jobs/{job_id}").json()
     assert body["status"] == "pending"
     assert body["download_url"] is None
+    assert body["preview_url"] is None
     assert body["error"] is None
 
 
@@ -73,11 +74,13 @@ def test_get_done_job_has_presigned_attachment_download(client, table):
         ExpressionAttributeValues={":done": "done"},
     )
     body = client.get(f"/jobs/{job_id}").json()
-    url = urlparse(body["download_url"])
-    query = parse_qs(url.query)
-    assert url.path == f"/output/{job_id}.mp4"
-    assert query["X-Amz-Expires"] == ["900"]
-    assert query["response-content-disposition"] == [f'attachment; filename="reelops-{job_id}.mp4"']
+    # Same object, two signed links: attachment (download) and inline (<video>).
+    for field, disposition in [("download_url", "attachment"), ("preview_url", "inline")]:
+        url = urlparse(body[field])
+        query = parse_qs(url.query)
+        assert url.path == f"/output/{job_id}.mp4"
+        assert query["X-Amz-Expires"] == ["900"]
+        assert query["response-content-disposition"] == [f'{disposition}; filename="reelops-{job_id}.mp4"']
 
 
 def test_failed_job_reports_error(client, table):
@@ -89,7 +92,12 @@ def test_failed_job_reports_error(client, table):
         ExpressionAttributeValues={":f": "failed", ":e": "input.mp4 has no audio stream"},
     )
     body = client.get(f"/jobs/{job_id}").json()
-    assert (body["status"], body["error"], body["download_url"]) == ("failed", "input.mp4 has no audio stream", None)
+    assert (body["status"], body["error"], body["download_url"], body["preview_url"]) == (
+        "failed",
+        "input.mp4 has no audio stream",
+        None,
+        None,
+    )
 
 
 def test_unknown_and_malformed_ids(client):

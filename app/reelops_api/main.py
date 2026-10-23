@@ -5,6 +5,7 @@ Run with: uvicorn --factory reelops_api.main:create_app
 
 from __future__ import annotations
 
+from pathlib import Path
 from uuid import UUID
 
 import boto3
@@ -14,6 +15,7 @@ from pydantic import BaseModel, Field
 from . import __version__
 from .config import Settings
 from .jobs import InvalidUpload, JobNotFound, create_job, get_job, make_s3_client
+from .static import SpaStaticFiles
 
 
 class CreateJobRequest(BaseModel):
@@ -38,6 +40,7 @@ class JobResponse(BaseModel):
     created_at: int
     updated_at: int
     download_url: str | None
+    preview_url: str | None
 
 
 def create_app(settings: Settings | None = None, *, s3=None, table=None) -> FastAPI:
@@ -69,5 +72,10 @@ def create_app(settings: Settings | None = None, *, s3=None, table=None) -> Fast
             return get_job(str(job_id), settings=settings, table=table, s3=s3)
         except JobNotFound:
             raise HTTPException(status_code=404, detail="job not found") from None
+
+    # The web UI, from the same origin as the API. Mounted last: Starlette
+    # matches in order, so /jobs and /healthz always reach the routes above.
+    if settings.static_dir and Path(settings.static_dir, "index.html").is_file():
+        app.mount("/", SpaStaticFiles(directory=settings.static_dir, html=True), name="ui")
 
     return app

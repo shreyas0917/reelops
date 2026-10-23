@@ -3,7 +3,7 @@
 # commit that touched its folder, push to ECR (login via the instance role),
 # and write the tags to terraform/main/images.auto.tfvars (git-ignored).
 #
-# Needs: ECR repos from terraform/main, docker, aws CLI, a clean app/ and worker/.
+# Needs: ECR repos from terraform/main, docker, aws CLI, a clean app/, frontend/ and worker/.
 # Usage: scripts/push_images.sh
 set -euo pipefail
 
@@ -11,10 +11,16 @@ cd "$(dirname "$0")/.."
 REGION="${AWS_REGION:-ap-south-1}"
 TFVARS="terraform/main/images.auto.tfvars"
 
+# Source folders, build context and Dockerfile per image. The API image also
+# contains the built frontend.
+declare -A SRC=([api]="app frontend" [worker]="worker")
+declare -A CONTEXT=([api]="." [worker]="worker")
+declare -A DOCKERFILE=([api]="app/Dockerfile" [worker]="worker/Dockerfile")
+
 # A SHA tag must describe the code inside the image.
-if [ -n "$(git status --porcelain -- app worker)" ]; then
-  echo "app/ or worker/ has uncommitted changes; commit them so the image tag matches the code" >&2
-  git status --short -- app worker >&2
+if [ -n "$(git status --porcelain -- app frontend worker)" ]; then
+  echo "app/, frontend/ or worker/ has uncommitted changes; commit them so the image tag matches the code" >&2
+  git status --short -- app frontend worker >&2
   exit 1
 fi
 
@@ -29,10 +35,10 @@ echo "logged in to $REGISTRY"
 declare -A TAGS
 pushed=()
 for name in api worker; do
-  dir=$([ "$name" = api ] && echo app || echo worker)
-  # Last commit touching this image's folder: unrelated commits don't create
+  # Last commit touching this image's folders: unrelated commits don't create
   # a "new" tag (and a redeploy) for identical code.
-  tag=$(git log -1 --format=%h --abbrev=7 -- "$dir")
+  # shellcheck disable=SC2086 # SRC holds space-separated paths
+  tag=$(git log -1 --format=%h --abbrev=7 -- ${SRC[$name]})
   repo=$(url_for "$name")
   TAGS[$name]=$tag
 
@@ -41,12 +47,12 @@ for name in api worker; do
     echo "reelops-$name:$tag already in ECR; skipping (tags are immutable)"
     continue
   fi
-  echo "building reelops-$name:$tag from $dir/"
+  echo "building reelops-$name:$tag from ${SRC[$name]}"
   # Single image manifest, not an OCI index with attestation children:
   # ECR basic scanning skips indexes, and lifecycle "keep 10" would count
   # (and could expire) the untagged children.
   docker build --quiet --platform linux/amd64 --provenance=false --sbom=false \
-    -t "$repo:$tag" "$dir" >/dev/null
+    -f "${DOCKERFILE[$name]}" -t "$repo:$tag" "${CONTEXT[$name]}" >/dev/null
   echo "pushing $repo:$tag"
   docker push --quiet "$repo:$tag" >/dev/null
   pushed+=("$name")

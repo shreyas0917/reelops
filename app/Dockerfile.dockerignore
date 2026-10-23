@@ -1,0 +1,18 @@
+# Used by app/Dockerfile (BuildKit reads <Dockerfile>.dockerignore). The
+# context is the repo root, so this is an allow-list: nothing else (terraform,
+# samples, .env, docs) can enter the build.
+*
+!app/requirements.txt
+!app/requirements-dev.txt
+!app/reelops_api/
+!app/tests/
+!frontend/package.json
+!frontend/package-lock.json
+!frontend/.npmrc
+!frontend/index.html
+!frontend/tsconfig.json
+!frontend/vite.config.ts
+!frontend/public/
+!frontend/src/
+**/__pycache__
+**/*.pyc

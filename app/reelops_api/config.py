@@ -22,6 +22,8 @@ class Settings:
     max_upload_bytes: int = 200 * 1024 * 1024  # 200 MB
     url_expiry_seconds: int = 15 * 60  # presigned URL lifetime
     job_ttl_seconds: int = 7 * 24 * 3600  # DynamoDB expires_at
+    # Built frontend (Vite dist/) to serve at "/"; None = API only.
+    static_dir: str | None = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Settings:
@@ -37,4 +39,5 @@ class Settings:
             media_bucket=required("REELOPS_MEDIA_BUCKET"),
             jobs_table=required("REELOPS_JOBS_TABLE"),
             aws_region=(env.get("AWS_REGION") or env.get("AWS_DEFAULT_REGION") or "ap-south-1").strip(),
+            static_dir=env.get("REELOPS_STATIC_DIR", "").strip() or None,
         )
