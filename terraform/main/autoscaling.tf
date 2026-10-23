@@ -157,10 +157,12 @@ resource "aws_appautoscaling_policy" "worker_scale_in" {
     cooldown                = 300
     metric_aggregation_type = "Maximum"
 
-    # One unbounded step: any value -> 0 tasks. The alarm can be in ALARM on
-    # missing data, which a bounded step might not match.
+    # backlog <= 0 -> 0 tasks. At least one bound is required (the API rejects
+    # a step with neither). Bounds are relative to the alarm threshold (0);
+    # below the threshold the upper bound is inclusive, so this is (-inf, 0].
     step_adjustment {
-      scaling_adjustment = 0
+      metric_interval_upper_bound = 0
+      scaling_adjustment          = 0
     }
   }
 }
