@@ -42,9 +42,9 @@ def run(video: Path, out_mp4: Path, settings: Settings, *, model=None, polly=Non
     with tempfile.TemporaryDirectory(prefix="reelops-") as tmp:
         work = Path(tmp)
 
-        if not ffmpeg.has_stream(video, "video"):
+        if not ffmpeg.has_stream(video, "video", untrusted=True):
             raise PipelineError(f"{video.name} has no video stream")
-        duration = ffmpeg.duration(video)
+        duration = ffmpeg.duration(video, untrusted=True)
         log.info("input: %s (%.1fs)", video.name, duration)
 
         with _stage("audio", timings):
