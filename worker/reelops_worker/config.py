@@ -54,6 +54,9 @@ class Settings:
     # How long a job may keep running after SIGTERM before it's handed back.
     # Below ECS's default 30 s stop timeout.
     shutdown_grace_seconds: int = 20
+    # ECS task scale-in protection expiry while holding a job (ECS allows
+    # 1-2880). Covers a 200 MB video; lapses by itself if a worker dies.
+    task_protection_minutes: int = 60
 
     def __post_init__(self) -> None:
         if not self.heartbeat_seconds < self.lease_seconds < self.visibility_timeout:
@@ -65,6 +68,8 @@ class Settings:
             raise ValueError(
                 f"REELOPS_MAX_SPEEDUP must be between 1.0 and 2.0, got {self.max_speedup}"
             )
+        if not 1 <= self.task_protection_minutes <= 2880:
+            raise ValueError(f"task_protection_minutes must be 1-2880, got {self.task_protection_minutes}")
         if self.caption_max_chars < 10:
             raise ValueError(
                 f"REELOPS_CAPTION_MAX_CHARS must be at least 10, got {self.caption_max_chars}"

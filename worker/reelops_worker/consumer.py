@@ -30,6 +30,7 @@ from botocore.exceptions import ClientError
 from . import PipelineError
 from .config import Settings
 from .pipeline import run as run_pipeline
+from .protection import TaskProtection
 from .transcribe import load_model
 
 log = logging.getLogger(__name__)
@@ -141,7 +142,7 @@ class Heartbeat:
 class Consumer:
     def __init__(
         self, settings: Settings, *, sqs, s3, table, polly=None, model=None, worker_id=None, clock=time.time,
-        stopping: threading.Event | None = None,
+        stopping: threading.Event | None = None, protection: TaskProtection | None = None,
     ):  # fmt: skip
         settings.require_consumer()
         self.settings = settings
@@ -154,6 +155,8 @@ class Consumer:
         self.worker_id = worker_id or f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:6]}"
         # May already be set: a stop requested during startup is not lost.
         self.stopping = stopping or threading.Event()
+        # Disabled unless $ECS_AGENT_URI is set (i.e. running on ECS).
+        self.protection = protection or TaskProtection(expires_minutes=settings.task_protection_minutes)
         self._busy = False
         self._signals = False
 
@@ -268,6 +271,17 @@ class Consumer:
         log.info("job %s: claimed by %s (receive %d)", job_id, self.worker_id, receives)
         self._busy = True
         try:
+            # Scale-in protection for the whole job, including the final
+            # "done" write and the delete; cleared on every exit path.
+            with self.protection.protected(job_id):
+                return self._run_job(job_id, obj, receipt, receives)
+        finally:
+            self._busy = False
+            if self._signals:
+                signal.alarm(0)
+
+    def _run_job(self, job_id: str, obj: S3Object, receipt: str, receives: int) -> str:
+        try:
             with Heartbeat(self, job_id, receipt) as heartbeat, tempfile.TemporaryDirectory(prefix="job-") as tmp:
                 src = Path(tmp) / Path(obj.key).name
                 self.s3.download_file(obj.bucket, obj.key, str(src))
@@ -311,11 +325,6 @@ class Consumer:
                 # Release the claim so the retry can take it straight away.
                 self._set_status(job_id, "pending", error=str(exc))
             return "retry"
-
-        finally:
-            self._busy = False
-            if self._signals:
-                signal.alarm(0)
 
     # ---- DynamoDB ----------------------------------------------------------
 
@@ -434,7 +443,9 @@ def main(stop: threading.Event | None = None) -> int:
         polly=boto3.client("polly", region_name=region),
         model=model,
         stopping=stop,
+        protection=TaskProtection(expires_minutes=settings.task_protection_minutes),
     )
+    log.info("task scale-in protection: %s", "enabled" if consumer.protection.enabled else "disabled (no ECS_AGENT_URI)")
     consumer.install_signal_handlers()
     consumer.run_forever()
     return 0

@@ -302,3 +302,61 @@ def test_heartbeat_refreshes_lease_and_detects_loss(aws):
                           ExpressionAttributeValues={":o": "worker-other"})  # fmt: skip
         time.sleep(1.2)
         assert hb.lost.is_set()
+
+
+# ---- task scale-in protection ---------------------------------------------------
+
+from fake_ecs_agent import fake_agent  # noqa: E402
+
+from reelops_worker.protection import TaskProtection  # noqa: E402
+
+
+def protected_worker(aws, settings, clock, agent):
+    sqs, _, s3, table = aws
+    return Consumer(settings, sqs=sqs, s3=s3, table=table, worker_id="worker-me", clock=clock,
+                    protection=TaskProtection(agent.url))  # fmt: skip
+
+
+def test_task_is_protected_while_processing(aws, settings, clock, monkeypatch):
+    seen = []
+
+    def pipeline(video, out_mp4, settings, **kwargs):
+        seen.append(agent.protected)  # state of the fake agent mid-job
+        Path(out_mp4).write_bytes(b"out")
+        return Path(out_mp4)
+
+    monkeypatch.setattr(consumer, "run_pipeline", pipeline)
+    with fake_agent() as agent:
+        _, key = make_job(aws)
+        assert protected_worker(aws, settings, clock, agent).handle(deliver(aws, s3_event(key))) == "done"
+        assert seen == [True]
+        assert agent.protected is False
+        assert [b["ProtectionEnabled"] for *_, b in agent.requests] == [True, False]
+
+
+@pytest.mark.parametrize(("error", "outcome"), [(PipelineError("no audio"), "failed"), (Shutdown(), "abandoned")])
+def test_protection_cleared_on_failure_paths(aws, settings, clock, monkeypatch, error, outcome):
+    def boom(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(consumer, "run_pipeline", boom)
+    with fake_agent() as agent:
+        _, key = make_job(aws)
+        assert protected_worker(aws, settings, clock, agent).handle(deliver(aws, s3_event(key))) == outcome
+        assert agent.protected is False
+        assert [b["ProtectionEnabled"] for *_, b in agent.requests] == [True, False]
+
+
+def test_broken_agent_does_not_fail_the_job(aws, settings, clock, fake_pipeline):
+    with fake_agent() as agent:
+        agent.mode = "http_error"
+        job_id, key = make_job(aws)
+        assert protected_worker(aws, settings, clock, agent).handle(deliver(aws, s3_event(key))) == "done"
+        assert job(aws, job_id)["status"] == "done"
+
+
+def test_duplicates_do_not_touch_protection(aws, settings, clock, fake_pipeline):
+    with fake_agent() as agent:
+        _, key = make_job(aws, status="done")
+        assert protected_worker(aws, settings, clock, agent).handle(deliver(aws, s3_event(key))) == "duplicate_done"
+        assert agent.requests == []
