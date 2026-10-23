@@ -7,10 +7,28 @@
 # .env from scripts/env_from_tf.sh, aws CLI, curl, python3, ffprobe.
 # Waits up to 60 s for /healthz, so it also works right after `up` without --wait.
 # Usage: scripts/e2e.sh [video]          (default samples/synthetic.mp4)
+#        API_URL=http://<alb-dns> scripts/e2e.sh   (against ECS; worker logs
+#        are then read from CloudWatch instead of docker compose)
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-API="${API:-http://localhost:8000}"
+API="${API_URL:-${API:-http://localhost:8000}}"
+WORKER_LOG_GROUP="${WORKER_LOG_GROUP:-/reelops/dev/worker}"
+case "$API" in
+  http://localhost* | http://127.0.0.1*) WORKER_LOGS=compose ;;
+  *) WORKER_LOGS=cloudwatch ;;
+esac
+
+# Print the first worker log line containing $1 logged since epoch-ms $2.
+worker_log() {
+  if [ "$WORKER_LOGS" = compose ]; then
+    docker compose logs --since "$(date -u -d "@$(($2 / 1000))" +%Y-%m-%dT%H:%M:%SZ)" worker 2>/dev/null \
+      | grep -F "$1" | head -1 | sed 's/^[^|]*| //' || true
+  else
+    aws logs filter-log-events --log-group-name "$WORKER_LOG_GROUP" --start-time "$2" \
+      --filter-pattern "\"$1\"" --query 'events[0].message' --output text 2>/dev/null | grep -v '^None$' || true
+  fi
+}
 INPUT="${1:-samples/synthetic.mp4}"
 OUT_DIR="samples/output"
 TIMEOUT_S=300
@@ -96,17 +114,18 @@ print(json.dumps({"Records": [{"eventSource": "aws:s3", "eventName": "ObjectCrea
   "s3": {"bucket": {"name": bucket},
          "object": {"key": urllib.parse.quote_plus(key, safe="/"), "size": int(size), "eTag": etag}}}]}))
 ' "$REELOPS_MEDIA_BUCKET" "$KEY" "$SIZE" "$ETAG")
-since_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+since_ms=$(($(date +%s) * 1000 - 5000))
 t=$(now)
 aws sqs send-message --queue-url "$REELOPS_JOBS_QUEUE_URL" --message-body "$EVENT" --output text --query MessageId >/dev/null
-echo "5. re-sent the S3 event for $KEY by hand"
-for _ in $(seq 30); do
-  line=$(docker compose logs --since "$since_ts" worker 2>/dev/null | grep "job $JOB_ID: duplicate skipped" || true)
+echo "5. re-sent the S3 event for $KEY by hand (watching $WORKER_LOGS worker logs)"
+line=""
+for _ in $(seq 60); do # CloudWatch delivery lags a few seconds
+  line=$(worker_log "job $JOB_ID: duplicate skipped" "$since_ms")
   [ -n "$line" ] && break
   sleep 1
 done
-[ -n "$line" ] || { echo "worker did not log 'duplicate skipped' within 30s" >&2; exit 1; }
-echo "   worker log:${line#*|}"
+[ -n "$line" ] || { echo "worker did not log 'duplicate skipped' within 60s" >&2; exit 1; }
+echo "   worker log: $line"
 JOB=$(curl -sf "$API/jobs/$JOB_ID")
 echo "   job after duplicate: status=$(json "['status']" <<<"$JOB") attempts=$(json "['attempts']" <<<"$JOB") (before: done, $ATTEMPTS)"
 [ "$(json "['status']" <<<"$JOB")" = done ] && [ "$(json "['attempts']" <<<"$JOB")" = "$ATTEMPTS" ] \
