@@ -38,7 +38,29 @@ class Settings:
 
     aws_region: str = "ap-south-1"
 
+    # Queue consumer (python -m reelops_worker consume). Unused by the CLI.
+    jobs_queue_url: str | None = None
+    media_bucket: str | None = None
+    jobs_table: str | None = None
+    max_input_bytes: int = 200 * 1024 * 1024
+    # Must match the SQS queue (terraform/main/sqs.tf).
+    visibility_timeout: int = 300
+    max_receives: int = 3
+    heartbeat_seconds: int = 60
+    # Shorter than the visibility timeout on purpose: a dead worker's lease must
+    # be stale before its message reappears, or the redelivery would see a
+    # "fresh" lease, drop the message, and the job would be stuck.
+    lease_seconds: int = 240
+    # How long a job may keep running after SIGTERM before it's handed back.
+    # Below ECS's default 30 s stop timeout.
+    shutdown_grace_seconds: int = 20
+
     def __post_init__(self) -> None:
+        if not self.heartbeat_seconds < self.lease_seconds < self.visibility_timeout:
+            raise ValueError(
+                "need heartbeat_seconds < lease_seconds < visibility_timeout, got "
+                f"{self.heartbeat_seconds} / {self.lease_seconds} / {self.visibility_timeout}"
+            )
         if not 1.0 <= self.max_speedup <= 2.0:
             raise ValueError(
                 f"REELOPS_MAX_SPEEDUP must be between 1.0 and 2.0, got {self.max_speedup}"
@@ -87,4 +109,21 @@ class Settings:
             caption_max_chars=get_number("REELOPS_CAPTION_MAX_CHARS", d.caption_max_chars, int),
             caption_max_lines=get_number("REELOPS_CAPTION_MAX_LINES", d.caption_max_lines, int),
             aws_region=get("AWS_REGION", None) or get("AWS_DEFAULT_REGION", d.aws_region),
+            jobs_queue_url=get("REELOPS_JOBS_QUEUE_URL", None),
+            media_bucket=get("REELOPS_MEDIA_BUCKET", None),
+            jobs_table=get("REELOPS_JOBS_TABLE", None),
         )
+
+    def require_consumer(self) -> None:
+        """Raise if settings needed by the queue consumer are missing."""
+        missing = [
+            name
+            for name, value in [
+                ("REELOPS_JOBS_QUEUE_URL", self.jobs_queue_url),
+                ("REELOPS_MEDIA_BUCKET", self.media_bucket),
+                ("REELOPS_JOBS_TABLE", self.jobs_table),
+            ]
+            if not value
+        ]
+        if missing:
+            raise ValueError(f"consumer mode needs {', '.join(missing)} (see scripts/env_from_tf.sh)")
