@@ -1,0 +1,434 @@
+/* ReelOps "screening room". Tokens and contrast: docs/learning-notes.md. */
+
+:root {
+  --stage: #13232a;
+  --screen: #0b1519;
+  --porcelain: #eceae5;
+  --steel: #7c8e95;
+  --yellow: #f2d64b;
+  --signal: #d8574e; /* errors: non-text marks (3:1) */
+  --signal-text: #e0645b; /* errors: text (4.72:1 on stage) */
+
+  /* type scale, 1.25 from 16 px */
+  --fs-13: 0.8125rem;
+  --fs-14: 0.875rem; /* smallest steel text */
+  --fs-16: 1rem;
+  --fs-20: 1.25rem;
+  --fs-25: 1.5625rem;
+  --fs-31: 1.9375rem;
+  --fs-39: 2.4375rem;
+
+  --gutter: 16px;
+  --max: 960px;
+
+  color-scheme: dark;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--stage);
+  color: var(--porcelain);
+  font-family: "Schibsted Grotesk", system-ui, sans-serif;
+  font-size: 100%;
+  line-height: 1.5;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--stage);
+}
+
+:focus-visible {
+  outline: 2px solid var(--yellow);
+  outline-offset: 3px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* ---- page ------------------------------------------------------------------ */
+
+.page {
+  max-width: calc(var(--max) + 2 * var(--gutter));
+  margin: 0 auto;
+  padding: 32px var(--gutter) 48px;
+}
+
+.wordmark {
+  margin: 0;
+  font-size: var(--fs-20);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.intro {
+  margin: 48px 0 32px;
+  max-width: 40rem;
+}
+
+.nowrap {
+  white-space: nowrap;
+}
+
+.intro h1 {
+  margin: 0;
+  font-size: clamp(var(--fs-31), 4vw, var(--fs-39));
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: -0.015em;
+}
+
+.intro p {
+  margin: 12px 0 0;
+  color: var(--steel);
+  font-size: var(--fs-16);
+}
+
+/* ---- the screen ---------------------------------------------------------- */
+
+.screen {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  background: var(--screen);
+  border: 1px solid var(--steel);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.screen[data-droppable="true"] {
+  cursor: pointer;
+}
+
+/* Drag-over: an inset ring, so nothing changes size. */
+.screen[data-dragging="true"] {
+  box-shadow: inset 0 0 0 2px var(--yellow);
+}
+
+.screen video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+}
+
+/* Before play, the paused frame is blurred under a flat scrim so its own
+   burned-in caption doesn't collide with ours; both go on play. */
+.screen video[data-started="false"] {
+  filter: blur(10px);
+  transform: scale(1.05); /* hide the blur's soft edges */
+}
+
+/* Flat scrim over the paused finished video, removed on play. */
+.screen__scrim {
+  position: absolute;
+  inset: 0;
+  background: rgb(11 21 25 / 0.62);
+  pointer-events: none;
+}
+
+.screen__play {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+}
+
+.screen__play:focus-visible {
+  outline-offset: -5px;
+}
+
+.screen__progress {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 2px;
+  background: var(--yellow);
+}
+
+/* Burned-in subtitle: two lines reserved, bottom-centre, outlined. */
+.caption {
+  position: absolute;
+  left: 6%;
+  right: 6%;
+  bottom: 7%;
+  min-height: calc(2 * 1.3em);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  margin: 0;
+  font-size: clamp(18px, 2.4vw, 26px);
+  font-weight: 600;
+  line-height: 1.3;
+  text-align: center;
+  color: var(--yellow);
+  text-shadow:
+    0 0 2px #000,
+    0 1px 2px #000;
+  pointer-events: none;
+}
+
+.caption[data-numeric="true"] {
+  font-variant-numeric: tabular-nums;
+}
+
+.caption[data-tone="error"] {
+  color: var(--signal-text);
+}
+
+/* The one motion: the caption changes like a subtitle. */
+.caption__text {
+  animation: caption-in 150ms ease-out;
+}
+
+@keyframes caption-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .caption__text {
+    animation: none;
+  }
+}
+
+/* ---- actions --------------------------------------------------------------- */
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 16px;
+  min-height: 48px;
+  margin-top: 16px;
+}
+
+.actions__hint {
+  margin: 0;
+  color: var(--steel);
+  font-size: var(--fs-14);
+}
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 18px;
+  border: 1px solid var(--steel);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--porcelain);
+  font: inherit;
+  font-size: var(--fs-16);
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.button:hover {
+  border-color: var(--porcelain);
+}
+
+.button--primary {
+  border-color: var(--yellow);
+  background: var(--yellow);
+  color: var(--stage);
+}
+
+.button--primary:hover {
+  border-color: var(--porcelain);
+  background: var(--porcelain);
+}
+
+/* ---- timeline ---------------------------------------------------------------- */
+
+.timeline {
+  display: flex;
+  align-items: center;
+  margin: 32px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--fs-14);
+}
+
+.timeline li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--steel);
+}
+
+.timeline li:not(:first-child) {
+  flex: 1;
+}
+
+/* connector before every stage but the first */
+.timeline li:not(:first-child)::before {
+  content: "";
+  flex: 1;
+  min-width: 12px;
+  height: 1px;
+  margin: 0 12px;
+  background: var(--steel);
+  opacity: 0.6;
+}
+
+.timeline__dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border: 1px solid var(--steel);
+  border-radius: 50%;
+}
+
+.timeline li[data-state="done"] {
+  color: var(--porcelain);
+}
+.timeline li[data-state="done"] .timeline__dot {
+  background: var(--steel);
+}
+.timeline li[data-state="active"] {
+  color: var(--porcelain);
+  font-weight: 600;
+}
+.timeline li[data-state="active"] .timeline__dot {
+  border-color: var(--yellow);
+  background: var(--yellow);
+}
+.timeline li[data-state="failed"] {
+  color: var(--porcelain);
+}
+.timeline li[data-state="failed"] .timeline__dot {
+  border-color: var(--signal);
+  background: var(--signal);
+}
+
+/* ---- recent jobs ---------------------------------------------------------------- */
+
+.recent {
+  margin-top: 64px;
+}
+
+.recent h2 {
+  margin: 0 0 8px;
+  font-size: var(--fs-16);
+  font-weight: 600;
+}
+
+.recent__empty {
+  margin: 0;
+  color: var(--steel);
+  font-size: var(--fs-14);
+}
+
+.recent ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid rgb(124 142 149 / 0.35);
+}
+
+.recent__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 7rem 6.5rem;
+  gap: 16px;
+  align-items: baseline;
+  width: 100%;
+  padding: 12px 0;
+  border: 0;
+  border-bottom: 1px solid rgb(124 142 149 / 0.35);
+  background: none;
+  color: var(--porcelain);
+  font: inherit;
+  font-size: var(--fs-16);
+  text-align: left;
+  cursor: pointer;
+}
+
+.recent__row[aria-current="true"] .recent__title {
+  font-weight: 600;
+}
+
+.recent__title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recent__status,
+.recent__time {
+  color: var(--steel);
+  font-size: var(--fs-14);
+}
+
+.recent__status[data-status="failed"] {
+  color: var(--signal-text);
+}
+
+.recent__time {
+  text-align: right;
+}
+
+.footer {
+  margin-top: 48px;
+  color: var(--steel);
+  font-size: var(--fs-14);
+}
+
+/* ---- phones ------------------------------------------------------------------------ */
+
+@media (max-width: 600px) {
+  .page {
+    padding-top: 24px;
+  }
+  .intro {
+    margin: 32px 0 24px;
+  }
+  .actions {
+    min-height: 80px; /* button + one-line hint: no shift between states */
+    align-content: flex-start;
+  }
+  .timeline li {
+    gap: 6px;
+  }
+  /* Phones: no connectors (they read as dashes and overflow); spaced dots
+     in order still read as a sequence. */
+  .timeline {
+    justify-content: space-between;
+  }
+  .timeline li:not(:first-child) {
+    flex: none;
+  }
+  .timeline li:not(:first-child)::before {
+    display: none;
+  }
+  .recent__row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    row-gap: 2px;
+  }
+  .recent__time {
+    grid-column: 1 / -1;
+    text-align: left;
+  }
+}
