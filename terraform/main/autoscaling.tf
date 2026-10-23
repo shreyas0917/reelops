@@ -57,6 +57,8 @@ resource "aws_cloudwatch_metric_alarm" "worker_scale_out" {
     label       = "Jobs backlog (visible + in flight)"
     return_data = true
   }
+
+  alarm_actions = [aws_appautoscaling_policy.worker_scale_out[0].arn]
 }
 
 resource "aws_cloudwatch_metric_alarm" "worker_scale_in" {
@@ -92,5 +94,73 @@ resource "aws_cloudwatch_metric_alarm" "worker_scale_in" {
     expression  = "visible + inflight"
     label       = "Jobs backlog (visible + in flight)"
     return_data = true
+  }
+
+  alarm_actions = [aws_appautoscaling_policy.worker_scale_in[0].arn]
+}
+
+# Step scaling on the backlog alarms. ExactCapacity sets the task count
+# directly. Target tracking can't do this: at 0 tasks a per-task metric
+# (CPU, backlog per task) doesn't exist, so it never scales back out; these
+# alarms watch the queue, which exists with or without tasks.
+#
+# While backlog >= 1 the scale-out alarm stays in ALARM and the policy is
+# re-applied every minute, so capacity also follows the backlog down (e.g.
+# 3 -> 1). Task scale-in protection (Step 4) keeps busy workers from being
+# the ones stopped.
+resource "aws_appautoscaling_policy" "worker_scale_out" {
+  count = local.compute
+
+  name               = "${local.name}-worker-scale-out"
+  policy_type        = "StepScaling"
+  service_namespace  = aws_appautoscaling_target.worker[0].service_namespace
+  resource_id        = aws_appautoscaling_target.worker[0].resource_id
+  scalable_dimension = aws_appautoscaling_target.worker[0].scalable_dimension
+
+  step_scaling_policy_configuration {
+    adjustment_type         = "ExactCapacity"
+    cooldown                = 60
+    metric_aggregation_type = "Maximum"
+
+    # Bounds are relative to the alarm threshold (1); lower inclusive, upper
+    # exclusive. backlog 1-2 -> 1 task
+    step_adjustment {
+      metric_interval_lower_bound = 0
+      metric_interval_upper_bound = 2
+      scaling_adjustment          = 1
+    }
+    # backlog 3-5 -> 2 tasks
+    step_adjustment {
+      metric_interval_lower_bound = 2
+      metric_interval_upper_bound = 5
+      scaling_adjustment          = 2
+    }
+    # backlog 6+ -> 3 tasks
+    step_adjustment {
+      metric_interval_lower_bound = 5
+      scaling_adjustment          = 3
+    }
+  }
+}
+
+resource "aws_appautoscaling_policy" "worker_scale_in" {
+  count = local.compute
+
+  name               = "${local.name}-worker-scale-in"
+  policy_type        = "StepScaling"
+  service_namespace  = aws_appautoscaling_target.worker[0].service_namespace
+  resource_id        = aws_appautoscaling_target.worker[0].resource_id
+  scalable_dimension = aws_appautoscaling_target.worker[0].scalable_dimension
+
+  step_scaling_policy_configuration {
+    adjustment_type         = "ExactCapacity"
+    cooldown                = 300
+    metric_aggregation_type = "Maximum"
+
+    # One unbounded step: any value -> 0 tasks. The alarm can be in ALARM on
+    # missing data, which a bounded step might not match.
+    step_adjustment {
+      scaling_adjustment = 0
+    }
   }
 }
