@@ -569,7 +569,7 @@ lifecycle's `transition_default_minimum_object_size` only affects transitions.
    saved plan applies exactly the reviewed changes, and fails if the state
    changed in the meantime.
 
-### Step 6 — Verification (6a and 6c done; 6b pending)
+### Step 6 — Verification
 
 **Built:** Verified the applied data layer with data-plane calls (no
 infrastructure changes):
@@ -579,9 +579,14 @@ infrastructure changes):
 - *6c:* put, conditional duplicate put (rejected), lease claim by "worker A"
   (accepted), second claim by "worker B" (rejected with
   ConditionalCheckFailedException), consistent read, delete.
-- *6b (DLQ → alarm → email): not run yet,* because the SNS email subscription
-  was still `PendingConfirmation`; an alarm notification sent before
-  confirmation is dropped. To do after confirming.
+- *6b (DLQ → alarm → email):* sent a test message to the main queue, received
+  it 3 times without deleting (visibility reset to 0 between receives,
+  `ApproximateReceiveCount` 1 → 2 → 3); the 4th receive returned nothing
+  because SQS moved it to the DLQ. The alarm went to ALARM ~3 min after the
+  message reached the DLQ and emailed the alert. After purging the DLQ it
+  returned to OK ~3.5 min later and emailed the OK notification. Both queues
+  ended empty. Run after the commit in Step 7, once the subscription was
+  confirmed (an alarm notification sent before confirmation is dropped).
 
 **Why / alternatives:** Verifying with real messages proves the wiring that
 `terraform plan` can't: the queue policy actually lets S3 send, the prefix
@@ -593,10 +598,20 @@ dev stack), worth adding once the pipeline is deployed.
 - `get-queue-attributes` showed 0 messages while the TestEvent was actually
   present: the counts are approximate and lag. A real `receive-message` is the
   reliable check.
-- The email subscription stayed `PendingConfirmation` despite a click (likely
-  an old link, a link scanner, or a confirmation page error). Fix: re-send with
-  `aws sns subscribe` for the same endpoint, which reuses the pending
-  subscription, then click the new link.
+- The email subscription showed `PendingConfirmation` when first checked, so
+  6b was held back; a later `list-subscriptions-by-topic` showed a real
+  subscription ARN and no re-send was needed. Lesson: check the subscription
+  ARN before relying on email alerts. (If it really is stuck, `aws sns
+  subscribe` for the same endpoint re-sends the confirmation for the existing
+  pending subscription.)
+- Redrive happens on the receive *after* the limit: with `maxReceiveCount = 3`,
+  the message moved to the DLQ on the 4th receive attempt, which returned
+  empty. The receive count carries over into the DLQ.
+- Peeking with `--visibility-timeout 0 --max-number-of-messages 10` returned
+  the same single DLQ message 10 times, because it never becomes hidden.
+  Trust `ApproximateNumberOfMessages` (1) over the batch size when peeking.
+- Alarm latency was ~3 minutes in each direction (SQS metric lag plus the
+  60 s evaluation period): expect minutes, not seconds.
 - The eTag equals the MD5 only for single-part, non-KMS uploads; multipart
   eTags look like `<hash>-<parts>`. Treat it as an opaque identifier.
 
@@ -624,7 +639,8 @@ its Step 1 version was staged with `git hash-object` + `update-index`, as in
 Phase 1. Before pushing, the staged files were scanned for the account ID and
 the alert email.
 
-**Problems:** Committed with 6b still pending, at the user's request.
+**Problems:** Committed with 6b still pending, at the user's request; 6b was
+completed right after and the Step 6 entry updated.
 
 **Interview questions:**
 1. *What should never be committed from a Terraform project?* State files
