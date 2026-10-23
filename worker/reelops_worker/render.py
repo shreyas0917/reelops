@@ -39,7 +39,7 @@ def render(video: Path, srt: Path, voiceover: Path, out_mp4: Path) -> Path:
     )
     ffmpeg.run(
         [
-            "-i", video.resolve(),
+            *ffmpeg.upload_input(video.resolve()),
             "-i", voiceover.resolve(),
             "-map", "0:v:0", "-map", "1:a:0",
             "-vf", filters,

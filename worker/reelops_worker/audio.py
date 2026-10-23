@@ -16,11 +16,11 @@ def extract_audio(video: Path, out_wav: Path) -> Path:
 
     Raises NoAudioStreamError if the video has no audio stream.
     """
-    if not ffmpeg.has_stream(video, "audio"):
+    if not ffmpeg.has_stream(video, "audio", untrusted=True):
         raise NoAudioStreamError(
             f"{video.name} has no audio stream. ReelOps needs a narrated recording "
             "to transcribe; record with your microphone on."
         )
     # 16 kHz mono 16-bit PCM is what Whisper expects.
-    ffmpeg.run(["-i", video, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", out_wav])
+    ffmpeg.run([*ffmpeg.upload_input(video), "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", out_wav])
     return out_wav

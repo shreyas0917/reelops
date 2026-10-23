@@ -2,7 +2,7 @@ import shutil
 
 import pytest
 
-from reelops_worker import ffmpeg
+from reelops_worker import PipelineError, ffmpeg
 from reelops_worker.audio import NoAudioStreamError, extract_audio
 
 # Real ffmpeg on tiny generated clips: faking ffprobe would only test the fake.
@@ -29,3 +29,27 @@ def test_extracts_16khz_mono_wav(tmp_path):
     wav = extract_audio(video, tmp_path / "out.wav")
     stream = ffmpeg.probe(wav)["streams"][0]
     assert (stream["codec_name"], stream["sample_rate"], stream["channels"]) == ("pcm_s16le", "16000", 1)
+
+
+DASH_MANIFEST = """<?xml version="1.0" encoding="UTF-8"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT1S"
+     minBufferTime="PT1S" profiles="urn:mpeg:dash:profile:isoff-on-demand:2011">
+  <Period><AdaptationSet mimeType="video/mp4"><Representation id="1" bandwidth="1000">
+    <BaseURL>x.mp4</BaseURL></Representation></AdaptationSet></Period>
+</MPD>
+"""
+
+
+def test_disguised_non_video_upload_is_rejected_before_parsing(tmp_path):
+    # A DASH manifest named .mp4 would otherwise be opened by ffmpeg's DASH
+    # demuxer (and libxml2); the upload format whitelist blocks it.
+    evil = tmp_path / "input.mp4"
+    evil.write_text(DASH_MANIFEST)
+    with pytest.raises(PipelineError, match="isn't an MP4, MOV or WebM video"):
+        extract_audio(evil, tmp_path / "out.wav")
+
+
+def test_upload_input_uses_the_whitelist(tmp_path):
+    args = ffmpeg.upload_input(tmp_path / "a.mp4")
+    assert args[:2] == ["-format_whitelist", ffmpeg.UPLOAD_FORMATS]
+    assert "dash" not in ffmpeg.UPLOAD_FORMATS.split(",")
