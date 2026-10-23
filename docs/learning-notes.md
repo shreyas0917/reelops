@@ -1659,3 +1659,378 @@ rejects it.
    they check syntax, types and provider-side schema; many constraints are
    enforced only by the cloud API at apply time (like Application Auto
    Scaling's step bounds), so applies can still fail partway.
+
+---
+
+## Phase 6 — Web UI ("screening room")
+
+### Design before code: tokens, wireframe, brief check
+
+No frontend-design skill was available in this session, so the design follows
+the client brief directly.
+
+**Colour tokens** (WCAG ratios measured on the stage `#13232A` unless noted):
+
+| Token | Value | Use | Contrast |
+|---|---|---|---|
+| `--stage` | `#13232A` | page background | — |
+| `--screen` | `#0B1519` | inside of the screen frame | — |
+| `--porcelain` | `#ECEAE5` | primary text | 13.42:1 (15.38 on screen) |
+| `--steel` | `#7C8E95` | secondary text (>= 14 px), borders, inactive stages | 4.73:1 (5.42 on screen) |
+| `--yellow` | `#F2D64B` | the single accent: caption line, active stage, primary button, focus ring | 11.14:1 (12.77 on screen); `--stage` text on it 11.14:1 |
+| `--signal` | `#D8574E` | errors only, non-text marks (failed stage, error border) | 4.14:1, passes the 3:1 UI threshold only |
+| `--signal-text` | `#E0645B` | error *text* | 4.72:1 (5.41 on screen) |
+
+Deviation from the brief: `#D8574E` fails AA for normal-size text (4.14:1),
+so error copy uses the slightly lighter `--signal-text`; the brief's red stays
+for marks.
+
+**Type:** Schibsted Grotesk only, self-hosted (`@fontsource`, latin subset,
+400 and 600). Scale (1.25 ratio from 16 px): 13 · 16 · 20 · 25 · 31 · 39.
+Body 16/1.5; secondary 14 (steel minimum); caption `clamp(18px, 2.4vw, 26px)`
+600 with a dark text outline like burned-in subtitles; headline 31-39 px.
+Sentence case everywhere. Numbers use tabular figures where they update
+(upload percentage) to avoid jitter.
+
+**Space and shape:** 4 px base (4, 8, 12, 16, 24, 32, 48, 64); content max
+width 960 px; 16 px side gutters on phones. Corners: 2 px on the screen
+(a screen, not a card), 6 px on buttons. No shadows; edges are 1 px steel
+borders.
+
+**Wireframe (1280 px):**
+```
+ ReelOps
+ Turn a screen recording into a captioned, AI-voiced demo.        <- h1
+ We transcribe it, write captions and re-voice it.                <- steel
+
+ ┌──────────────────────────────────────────────────────────────┐
+ │                                                              │
+ │                       16:9 screen                            │  <- drop zone;
+ │              (finished video plays here)                     │     upload progress
+ │                                                              │     is a 2 px yellow
+ │               Drop a screen recording here                   │     line on its bottom
+ └──────────────────────────────────────────────────────────────┘     edge
+  [Choose a recording]   mp4, mov or webm, up to 200 MB             <- actions row,
+                                                                       fixed height
+  ● Upload ───── ○ Queued ───── ○ Processing ───── ○ Done          <- timeline
+
+  Recent jobs
+  demo.mp4                                   Done          2 min ago
+  onboarding.mov                             Failed        Yesterday
+```
+At 380 px: same order, screen full width, caption 18 px, timeline labels
+13 px under their dots, recent-job rows wrap time under the title.
+
+**States** (caption · stage · actions):
+- empty: "Drop a screen recording here" · none · [Choose a recording]
+- uploading: "Uploading 42%" · Upload · progress line, keep-page-open note
+- queued: "Waiting for a worker to start" (after 30 s: "Starting a worker. The
+  first job can take about 3 minutes.") · Queued
+- processing: "Writing captions and voiceover" · Processing
+- done: "Ready to watch" over the paused video (a flat dark scrim, removed on
+  play) · Done · [Play video] [Download video] [Make another]
+- failed: the reason and the fix, in `--signal-text` · failed stage marked in
+  `--signal` · [Choose a recording]
+
+**Check against the brief:** screen is the drop zone and the memorable element
+✓; caption carries every status ✓; video plays in the same screen ✓; timeline
+shows real stages ✓; one accent ✓ (only yellow); signal red for errors only ✓
+(with an AA-driven text tint); one family, self-hosted ✓; sentence case, no
+all-caps eyebrows, no monospace labels, no "A · B" meta strings, no arrows on
+buttons, no cards with shadows, no gradients ✓ (the done-state scrim is flat);
+one motion (150 ms caption fade, off under reduced motion) ✓; recent jobs as a
+quiet list ✓; keyboard path via real buttons, yellow focus rings, 380 px
+layout, fixed-height caption and actions rows to avoid layout shift ✓.
+Open risk: the done state puts our caption over a video that has its own
+burned-in captions; the scrim and hiding our caption on play handle it, to be
+checked in the screenshots.
+
+### Step 1 — Frontend (Vite + React + TypeScript)
+
+**Built:** `frontend/`: pinned Vite 8.3.4, React 19.3.0, TypeScript 6.0.3,
+Vitest 5.0.3, Playwright 1.64.0, self-hosted Schibsted Grotesk (latin 400/600),
+`package-lock.json` with integrity hashes. Node runs only in a pinned
+`node:24.22.1-slim` image (security release), never on the host. The screen is
+the drop zone; the caption carries every status; uploads go to the presigned
+URL with XMLHttpRequest progress; polling every 2 s; a "starting a worker"
+caption after 30 s queued; the finished video plays in the screen; recent jobs
+in localStorage. 25 Vitest tests (validation, status mapping, storage
+failures, relative time); 16 Playwright tests produce screenshots of all six
+states at 1280 and 380 px against a mocked API and check behaviour (play,
+click-doesn't-pick, keyboard, no horizontal overflow, no layout shift).
+Bundle: 230 kB JS (72 kB gzip), 5 kB CSS, two 25 kB woff2 fonts.
+
+**Why / alternatives:**
+- *XMLHttpRequest for the upload:* `fetch` exposes download progress via the
+  response stream but has no upload progress events; streaming request bodies
+  (`duplex: "half"`) still gives no progress and has limited support.
+  `xhr.upload.onprogress` reports bytes sent.
+- *Content-Type from the extension,* not `File.type` (empty for some .mov
+  files), matching the API's check of extension + type together.
+- *Lock file:* `npm ci` installs exactly the locked tree (the worker's PyAV
+  break came from not locking transitive deps).
+- *TypeScript 6.0.3 over 7.x:* only used for type-checking (Vite compiles), and
+  the native 7.x line is still new for tooling.
+- *Mocked screenshots:* `page.route` for the API, a fake XHR for deterministic
+  "42%", and a VP9 WebM fixture because Playwright's Chromium has no H.264.
+
+**Problems (found by reviewing the screenshots):**
+- *Done state collision* (predicted in the design notes): "Ready to watch" sat
+  on the video's own burned-in caption and Chrome's control bar. Fixed: until
+  play, the paused frame is blurred under the flat scrim, native controls are
+  hidden, and the screen is a real "Play video" button (mouse, Enter, Space);
+  on play, blur, scrim and our caption go and controls appear.
+- *Spaces before punctuation* ("sound . Record"): `tabular-nums` on the whole
+  caption made this font's `.`/`,` fixed-width. Tabular figures now apply only
+  to "Uploading 42%".
+- *Clicking the finished video opened the file picker* (click-to-pick was on
+  whenever no job was busy). Now only empty/failed; tested.
+- *Phone:* "AI-" / "voiced" line break (kept together); 104 px reserved actions
+  height left a gap (80 px is enough); timeline connectors overflowed 380 px by
+  ~7 px and read as "A – B – C" dashes, so phones show spaced dots without
+  connectors. A no-overflow assertion now runs on every screenshot.
+- *Test artefacts, not bugs:* captions looked dim because screenshots caught
+  the 150 ms fade mid-way (now `animations: "disabled"`); a time test caught
+  locale-dependent "Sep 23" vs "23 Sep" (now explicit).
+- *Removed decoration:* the caption's soft 6 px glow (third text-shadow). The
+  tight dark outline keeps burned-in style captions legible; the glow only
+  softened the yellow.
+- *Verified quality floor:* timeline y identical in all six states (928 px at
+  1280, 625 px at 380); keyboard Tab → "Choose a recording" with a 2 px yellow
+  ring → recent rows → Enter reopens a job.
+
+**Interview questions:**
+1. *Why can't you show upload progress with `fetch`, and what do you use?*
+   `fetch` has no request-body progress events (only response streaming);
+   `XMLHttpRequest`'s `upload.onprogress` reports bytes sent, so it remains the
+   tool for progress bars on presigned S3 uploads.
+2. *How do you test a UI's states without a backend?* Mock the network at the
+   browser level (Playwright `page.route`), replace hard-to-control APIs (XHR)
+   with deterministic fakes via `addInitScript`, seed storage, and assert on
+   visible text before screenshotting each state; add checks for overflow,
+   layout shift and keyboard access so screenshots aren't the only signal.
+
+### Step 2 — API serves the UI, and returns preview_url
+
+**Built:** `GET /jobs/{id}` returns `preview_url` (presigned GET, `inline`) next to
+`download_url` (`attachment`). `reelops_api/static.py` (`SpaStaticFiles`)
+serves the built UI at `/`, mounted after the API routes, with an `index.html`
+fallback for page paths only, immutable caching for hashed `/assets/*`,
+`no-cache` for `index.html`, and `font/woff2` MIME types.
+`app/Dockerfile` is multi-stage: a pinned Node stage runs `npm ci`, the
+frontend unit tests and the build; the Python image copies only `dist/` to
+`/app/static`. Build context is the repo root with an allow-list
+`app/Dockerfile.dockerignore`. Compose and `push_images.sh` updated (API tag =
+last commit touching `app/` or `frontend/`). 17 API tests. Image: 256 MB (the UI
+adds ~0.3 MB; no Node in the final image).
+
+**Why / alternatives:**
+- *Two presigned URLs:* `ResponseContentDisposition` is part of the signature,
+  so inline (play) and attachment (save) need separate links to the same
+  object.
+- *Same origin for UI and API:* no API CORS, no second domain or certificate,
+  one deployable. Alternatives: S3 + CloudFront for the UI (better caching and
+  global edge, more moving parts) or a separate frontend service.
+- *Fallback only for extension-less paths:* serving `index.html` for a missing
+  `.js` turns a clear 404 into a confusing "Unexpected token '<'" error.
+- *Allow-list ignore file next to the Dockerfile:* with the repo root as
+  context, an allow-list guarantees `.env` (account ID), Terraform and samples
+  can't enter the build; verified by building a throwaway image that listed its
+  context.
+- *Frontend tests in the image build:* a failing UI test fails the build.
+
+**Problems:** Fonts were served as `application/octet-stream` (the slim image's
+`mimetypes` lacks `.woff2`); registered `font/woff2` / `font/woff` and added a
+test. Verified on a read-only root filesystem against real AWS: UI, caching
+headers, asset 404, API priority, and S3 returning `inline` vs `attachment`
+for a real finished job.
+
+**Interview questions:**
+1. *How do you serve a single-page app from the same server as its API without
+   breaking either?* Register API routes first and mount static files last; fall
+   back to `index.html` only for page-like paths (no file extension) so missing
+   assets stay 404; cache hashed assets forever and `index.html` with
+   `no-cache`.
+2. *Why use a multi-stage Docker build for a Python app with a JavaScript
+   frontend?* Build the frontend in a Node stage and copy only the static output
+   into the Python runtime image: no Node, `node_modules` or sources in
+   production, a smaller image and attack surface, and cached layers for
+   dependencies.
+
+### Step 3 — S3 CORS follows the ALB
+
+**Built:** The media bucket's CORS `allowed_origins` = `var.allowed_origins` plus
+`http://<alb dns name>` while `enable_compute` is true, computed from
+`aws_lb.api[0].dns_name` (a `local` in `s3.tf`). Plan: 1 in-place change.
+Before applying, a browser-style preflight (`OPTIONS` with `Origin`,
+`Access-Control-Request-Method: PUT`, `Access-Control-Request-Headers:
+content-type`) got 403 for the ALB origin, 200 for `localhost:5173`, 403 for an
+unlisted origin.
+
+**Why / alternatives:**
+- *CORS is a browser rule:* JavaScript from one origin may make non-simple
+  requests (a PUT with Content-Type) to another only if the target allows it in
+  a preflight. The UI (ALB origin) uploads to S3 (another origin), so the bucket
+  must list the ALB. Authorization is still the presigned signature.
+- *curl never needed it:* curl, the AWS CLI and boto3 aren't browsers; they send
+  no preflight and ignore CORS headers. That's why `e2e.sh` and the load test
+  always worked.
+- *Video playback and the download link need no CORS:* `<video src>` without
+  `crossorigin` and navigations don't expose the response to JavaScript.
+- *Computed, not typed:* the ALB's DNS name changes on every resume (it changed
+  twice in this project); deriving the origin from the resource keeps CORS
+  correct automatically. Alternatives: a stable custom domain on the ALB
+  (Route 53 + ACM), or uploading through CloudFront on the same origin.
+
+**Problems:** None. The pause plan shows no CORS change today only because the
+paused value (`localhost:5173`) equals the current one; after this apply,
+pausing will also remove the ALB origin.
+
+**Interview questions:**
+1. *Your browser upload to S3 fails with a CORS error, but the same presigned
+   URL works with curl. Why?* The browser sends a preflight and S3's CORS
+   rules don't allow the page's origin (or method/headers); curl doesn't do
+   CORS at all. Add the exact origin (scheme, host, port, no trailing slash),
+   method and headers to the bucket's CORS configuration.
+2. *Does CORS protect your bucket?* No. It protects users' browsers from
+   cross-site requests; non-browser clients ignore it. Access control comes from
+   IAM, bucket policies and presigned URL signatures.
+
+### Step 4 — Local dev server
+
+**Built:** `scripts/dev_frontend.sh` runs Vite (hot reload) in the pinned Node
+container with `--network host` and `--init`, bound to `127.0.0.1:5173`; Vite's
+proxy sends `/jobs` and `/healthz` to the compose API on `:8000` (real AWS
+behind it). Verified: listening on 127.0.0.1 only, proxy reaches the API, and a
+real Chromium (Playwright, host network) uploaded `synthetic.mp4` through
+`http://localhost:5173`: S3 PUT 200 with `Access-Control-Allow-Origin:
+http://localhost:5173`, then queued → processing → "Ready to watch" in 15.3 s
+(compose worker), `preview_url` loaded as a 206 range request.
+
+**Why / alternatives:**
+- *Proxy instead of API CORS:* the browser only talks to `localhost:5173`;
+  Vite forwards `/jobs` server-side, so dev looks same-origin like production.
+  Alternative: enable CORS on the API (more config, differs from prod).
+- *127.0.0.1 binding:* with host networking, `0.0.0.0` would listen on the
+  instance's public interface; VS Code port forwarding works with localhost.
+- *From Windows:* VS Code (Remote-SSH) → Ports → Forward a Port → 5173 → open
+  `http://localhost:5173`. The local port must stay 5173, because the bucket's
+  CORS allows exactly that origin; if VS Code maps it to another local port,
+  uploads fail CORS.
+
+**Problems:** The first dev container exited 137 on `docker stop` (SIGKILL after
+10 s): `sh` as PID 1 doesn't forward SIGTERM to Vite, the same PID 1 lesson as
+the Phase 3 worker. `--init` (tini) fixed it: stop now takes 0.1 s.
+
+**Interview questions:**
+1. *How do you develop a SPA locally against an API on another port without
+   CORS?* Use the dev server's proxy (`/api` paths forwarded server-side), so the
+   browser sees one origin, matching production where the API serves the UI.
+2. *Why might `docker stop` take 10 seconds and then kill your container?* PID 1
+   (often a shell wrapper) doesn't handle or forward SIGTERM, so Docker waits for
+   the timeout and sends SIGKILL; use exec-form entrypoints, `--init`/tini, or
+   handle the signal in the app.
+
+### Step 5 — New API image and plan
+
+**Built:** Fixed `dev_frontend.sh` to add `-it` only when stdin *and* stdout are
+terminals (a backgrounded run failed with "cannot attach stdin to a
+TTY-enabled container"; reproduced inside a pseudo-terminal, then verified the
+fix). Committed the frontend and API changes locally (push_images.sh needs a
+clean tree), pushed `reelops-api:e24591d` (63 MB compressed, scan unchanged:
+3 HIGH from the Debian base). Plan `phase6.tfplan`: 1 to add, 2 to change,
+1 to destroy = API task definition replaced (image `d52ab55` → `e24591d`;
+"destroy" deregisters revision 1), API service updated in place (new
+revision → rolling deploy), bucket CORS updated in place (adds the ALB
+origin). 58 no-ops.
+
+**Why / alternatives:** The rolling deploy (min healthy 100%, max 200%) starts
+the new API task, waits for the ALB health check on `/healthz`, then drains the
+old one (30 s deregistration delay), so the UI goes live with no downtime. No
+task-definition env change was needed: `REELOPS_STATIC_DIR` is baked into the
+image.
+
+**Problems:**
+- My first reproduction of the TTY bug was invalid (I redirected stdout to a
+  file, so the old check never added `-it`); redone with stdout on the
+  pseudo-terminal, which showed the exact error.
+- A `git status --cached` typo in my staging check went unnoticed under
+  `set -e` because it sat in a pipeline; I checked the commits' file lists
+  instead (no build output, screenshots, fixtures or media).
+
+**Interview questions:**
+1. *Why does `docker run -it` fail in some scripts?* `-i`/`-t` need stdin to be
+   a terminal; backgrounded jobs, CI and pipes don't have one. Allocate a TTY
+   only when `[ -t 0 ] && [ -t 1 ]`.
+2. *Why can `set -e` miss a failing command?* In a pipeline only the last
+   command's exit status counts (unless `set -o pipefail`), and failures inside
+   conditions (`if`, `&&`, `||`) don't trigger it either.
+
+### Step 6 — Deployed UI test with a real 73 MB upload
+
+**Built / verified:** After the apply, the CORS preflight from the ALB origin
+returns 200 (was 403) and the API runs task definition revision 2. The user
+uploaded `samples/demo.mp4` (73 MB) in the deployed UI from a Windows browser:
+it uploaded, the worker scaled from 0, processed, played in the page and
+downloaded. Timeline of job `4c3ac3ad` from AWS records:
+- *Upload:* POST 17:23:39 → finished ~17:35:25 (first status poll in the API
+  access log): 11 min 46 s, about 0.8 Mbit/s of home upload bandwidth.
+- *Queue → worker:* message sent 17:35 (SQS `NumberOfMessagesSent`), alarm on
+  the 17:36 data point at 17:38:26 (~3 min metric delay, as in Phase 5).
+- *Fargate:* task created 17:38:31, image pull 11 s, started 17:38:57.
+- *Processing:* claimed 17:38:59, done 17:39:32 (audio 0.3 s, transcribe 7.8 s,
+  voiceover 4.9 s, render 19.7 s). Total 15.9 min.
+
+**Why / alternatives:** The logs answered "where did 16 minutes go?" without
+guessing: the API access log marks upload completion (the UI only polls after
+the XHR upload ends), SQS `NumberOfMessagesSent` marks event arrival, alarm
+history and scaling activities mark scale-out, ECS task timestamps mark the
+cold start, and worker stage logs mark processing.
+
+**Problems / findings:**
+- *S3 `LastModified` isn't upload completion* for a long single PUT (17:24:49
+  vs completion ~17:35:25); I first suspected a 10-minute S3 → SQS delay, but
+  the API access log showed S3 delivered the event at once.
+- *Presigned URL lifetime vs slow uplinks:* this upload used 11 m 46 s of the
+  15-minute URL; 200 MB on the same link would take ~33 minutes. I believe S3
+  checks expiry when the request starts (so an upload in progress completes),
+  but that's unverified. Future improvement: multipart upload with per-part
+  presigned URLs (resumable, retryable parts) or a longer URL lifetime.
+- *Latency budget for a typical user:* upload time (their bandwidth) + ~3 min
+  metric delay + ~30 s cold start + ~30 s processing; the metric delay is the
+  part ReelOps controls (fix ideas in Phase 5 notes).
+
+**Interview questions:**
+1. *A user says a job took 16 minutes. How do you find out why?* Reconstruct a
+   timeline from authoritative timestamps across the system: API access log,
+   S3 object and event metrics, queue metrics, alarm history and scaling
+   activities, task lifecycle timestamps and application stage logs; then
+   attribute time to each segment before changing anything.
+2. *What are the limits of a single presigned PUT for large browser uploads?*
+   5 GB maximum object size per PUT, no resume after a dropped connection, the
+   whole file retried on failure, and the URL lifetime has to cover slow
+   connections. Multipart uploads with per-part presigned URLs solve all four.
+
+### Step 7 — Commit and push
+
+**Built:** Conventional Commits for Phase 6: the frontend and API commits (made
+locally in Step 5 so the image tag matched committed code), then the CORS
+change, the dev server script, and docs (`docs/ui.png` from the regenerated
+1280 px "done" screenshot, a Web UI section in the README, these notes), all
+pushed together. Not committed: `node_modules/`, `dist/`, screenshots, the
+WebM fixture, `samples/output/`, plan files.
+
+**Why / alternatives:** The README image comes from the same Playwright run as
+the tests (16 passed), so it matches the committed UI; a mocked API keeps it
+reproducible. Alternative: a screenshot of the live deployment (real data, but
+not reproducible and tied to a temporary ALB name).
+
+**Problems:** None.
+
+**Interview questions:**
+1. *How do you keep README screenshots honest?* Generate them from automated
+   tests against the committed code (mocked backend for determinism), and
+   regenerate them when the UI changes rather than editing images by hand.
+2. *What should never be committed from a frontend project?* `node_modules/`,
+   build output (`dist/`), test artefacts and reports, local env files; do
+   commit the lock file so installs are reproducible.

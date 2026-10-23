@@ -7,8 +7,17 @@ Terraform · AWS ECS Fargate · S3 · SQS · DynamoDB · GitHub Actions — regi
 
 ## Status
 
-Phases 0–5 done: video pipeline worker, queue-driven API + worker, ECS Fargate
-behind an ALB, and worker autoscaling on SQS backlog (0–3 tasks).
+Phases 0–6 done: video pipeline worker, queue-driven API + worker, ECS Fargate
+behind an ALB, worker autoscaling on SQS backlog (0–3 tasks), and a web UI
+served by the API.
+
+## Web UI
+
+The page is a screen: drop a recording on it, and the caption at the bottom
+carries the status until the finished video plays in the same frame. Uploads
+go straight to S3 with a presigned URL; the API only handles small JSON.
+
+![ReelOps web UI with a finished video ready to play](docs/ui.png)
 
 ## Autoscaling
 
