@@ -1,0 +1,28 @@
+# --- Terraform ---
+# State can contain account IDs, ARNs and secrets; it lives in S3, never in git.
+*.tfstate*
+.terraform/
+*.tfplan
+crash.log
+crash.*.log
+# Variable files may hold environment-specific or secret values.
+*.tfvars
+!*.tfvars.example
+# NOTE: .terraform.lock.hcl is intentionally NOT ignored - commit it so
+# everyone (and CI) uses the same provider versions.
+
+# --- Secrets ---
+.env
+
+# --- Python ---
+__pycache__/
+.venv/
+
+# --- Node ---
+node_modules/
+
+# --- Media (large, generated) ---
+*.mp4
+*.mov
+*.srt
+samples/output/
