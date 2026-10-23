@@ -6,3 +6,7 @@ alert_email = "you@example.com"
 
 # Browser origins allowed to upload via presigned URLs (default shown).
 # allowed_origins = ["http://localhost:5173"]
+
+# Who may reach the ALB on port 80. Required; 0.0.0.0/0 is rejected until the
+# API has authentication.
+allowed_cidrs = ["203.0.113.7/32"]

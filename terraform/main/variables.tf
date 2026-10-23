@@ -11,6 +11,23 @@ variable "allowed_origins" {
   }
 }
 
+variable "allowed_cidrs" {
+  description = "CIDRs allowed to reach the ALB on port 80 (e.g. home IP /32, dev box public IP /32). Set in terraform.tfvars."
+  type        = list(string)
+
+  validation {
+    condition     = length(var.allowed_cidrs) > 0 && alltrue([for c in var.allowed_cidrs : can(cidrhost(c, 0))])
+    error_message = "allowed_cidrs must be a non-empty list of valid CIDRs, e.g. [\"203.0.113.7/32\"]."
+  }
+
+  # The API has no authentication yet: anyone could upload 200 MB videos and
+  # spend Fargate and Polly time. Remove this check deliberately when ready.
+  validation {
+    condition     = !anytrue([for c in var.allowed_cidrs : contains(["0.0.0.0/0", "::/0"], c)])
+    error_message = "allowed_cidrs must not open the ALB to the whole internet (0.0.0.0/0 or ::/0) until the API has authentication."
+  }
+}
+
 variable "enable_compute" {
   description = "Create the ALB, target group, listener and ECS services. Set false to pause (network, ECR, IAM, logs, cluster and task definitions stay)."
   type        = bool
