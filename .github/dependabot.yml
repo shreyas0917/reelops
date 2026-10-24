@@ -81,6 +81,11 @@ updates:
     groups:
       minor-and-patch:
         update-types: [minor, patch]
+    ignore:
+      # TypeScript 7 is the native (Go) compiler rewrite; stay on 6.x until
+      # we choose to migrate, rather than take it as a routine bump.
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: docker
     directories: [/app, /worker]
