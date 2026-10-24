@@ -2716,6 +2716,208 @@ magic (`:(exclude,glob)frontend/src/**/*.test.ts`); checked with
    live with: a deny-list fails towards an extra rebuild, an allow-list fails
    towards shipping stale code.
 
+## Phase 8 — Failure drills against the live stack
+
+### Test 1 — Worker stopped mid-job (and a pre-flight finding)
+
+**What we built:** `scripts/chaos/` (shared `lib.sh`, one script per drill,
+`cleanup.sh`) and `docs/failure-tests.md`. Drill 1 stops the ECS task
+processing an 8-minute job: it handed the job back 24 s after SIGTERM, a new
+task re-claimed it 54 s after the stop (attempts 2) and finished it, with one
+output.
+
+**Why this way:** Drills read resource names from Terraform outputs (no IDs in
+files), record every job they create, and assert the outcome, ending with a
+PASS/FAIL line, so a re-run is a regression test. The owning task is found
+from the log stream of its "claimed" line, not guessed.
+
+**Problems:**
+- *A dev-box worker on the live queue:* the first run's job was claimed in 6 s
+  with 0 ECS tasks: the local `docker compose` worker took it. Drills now
+  refuse to run while one exists. Any process with the queue URL and
+  credentials is a consumer.
+- *`stop-task` is not a crash:* ECS sends SIGTERM, so the worker's graceful
+  hand-back runs and the message reappears at once, not after the 300 s
+  visibility timeout. The crash path needs a SIGKILL: drill 1b.
+- *The worker is faster than assumed:* 124 s of input in 16 s on Fargate, so a
+  2-minute job finished before the stop. The input is now 8 minutes.
+- *Harness bugs:* `tee` opened its log before the directory existed, and
+  `list-objects-v2 --query KeyCount` printed `None` under CLI auto-pagination.
+
+**Interview questions:**
+1. *What happens to an in-flight SQS job when its ECS task is stopped?* ECS
+   sends SIGTERM, waits `stopTimeout`, then SIGKILL. A well-behaved consumer
+   stops polling, finishes or hands back the job within that window (here:
+   status back to pending, visibility set to 0), so another consumer picks it
+   up immediately instead of after the visibility timeout.
+2. *Why run failure drills against the live stack, not only unit tests?* They
+   test the integration of real timeouts, IAM, autoscaling and ECS behaviour,
+   and they surface environmental surprises (here: a second consumer) that
+   no unit test can see.
+
+### Test 1b — Worker crash (SIGKILL), and receives spent by non-failures
+
+**What we built:** Drill 1b runs one deliberate worker on the dev box from the
+deployed ECR image, lets it claim an 8-minute job and SIGKILLs it. An ECS
+worker took over the stale lease 300 s after the claim (attempts 2) and
+finished it; one output; no local container left.
+
+**Why this way:** ECS can only SIGTERM a task (then SIGKILL after
+`stopTimeout`), and our worker handles SIGTERM gracefully, so a real crash
+had to be produced outside ECS. Using the deployed image keeps the crash in
+production code; a `trap` removes the container on any exit.
+
+**Problems:**
+- *Receive 3 after one real attempt:* a worker being scaled in received the
+  new message in its last long poll and released it (receive 1); the drill
+  worker's claim was receive 2 and the take-over receive 3. With
+  `maxReceiveCount = 3` and the worker's "give up" decision based on the same
+  SQS count, one transient error would have failed the job. Reported, not
+  fixed (code change).
+- *My "no ECS workers" check raced scale-in:* `list-tasks --desired-status
+  RUNNING` drops a stopping task that is still polling; now `runningCount`.
+
+**Interview questions:**
+1. *How does a queue consumer recover a job from a crashed worker?* A lease in
+   the database (claimed_at + owner, stale after N s) plus the queue's
+   visibility timeout set longer than the lease, so the message only
+   reappears once another worker may legally take over.
+2. *Why is SQS ApproximateReceiveCount a poor retry counter?* It counts every
+   receive, including releases and graceful hand-backs, not failures. Count
+   real attempts yourself (e.g. a conditional `ADD attempts` on claim) and
+   keep `maxReceiveCount` as a backstop for poison messages.
+
+### Test 2 — Duplicate delivery
+
+**What we built:** Drill 2 re-sends a finished job's S3 event to the queue.
+The worker logged "duplicate skipped (already done)" within the same second,
+deleted the message, and the job item (compared attribute by attribute) and
+the output object (same `LastModified`) were unchanged.
+
+**Why this way:** The event body is rebuilt from the real object (`head-object`
+size and ETag, URL-encoded key, as S3 sends it), so the duplicate is
+indistinguishable from a real redelivery. Comparing the whole item, not just
+`status`, catches any stray write such as a bumped `updated_at`.
+
+**Problems:** None; the 6 s reported is the drill's poll interval, not the
+worker's reaction time.
+
+**Interview questions:**
+1. *How do you make an at-least-once consumer idempotent?* Record the work's
+   state in a store that supports conditional writes and make the "start"
+   transition conditional (here `status = pending` or a stale lease), so a
+   duplicate finds the job already claimed or done and only deletes its message.
+2. *Why not deduplicate with an SQS FIFO queue instead?* FIFO deduplication
+   only covers a 5-minute window and identical message bodies sent to the
+   queue; S3 can redeliver later, and FIFO queues can't be S3 notification
+   targets anyway. Idempotency at the consumer covers every case.
+
+### Test 3 — Poison input (bug found)
+
+**What we built:** Drill 3 uploads a text file named .mp4 and a real video
+without audio. Both failed on their first attempt in under a second, were
+claimed once, their messages deleted and nothing reached the DLQ. The silent
+video's error is clear; the text file's is raw ffprobe output.
+
+**Why this way:** Inputs go through the public API like a user's would, so the
+drill tests the whole path (validation, presigned upload, S3 event, worker),
+and it asserts the error text, not just the status: a failed job with an
+unreadable message is still a bad outcome for the user.
+
+**Problems:** *Bug:* the friendly "isn't an MP4, MOV or WebM video" error only
+covers formats ffprobe detects and the whitelist rejects; unrecognised data
+falls back to the mp4 demuxer ("moov atom not found") and the raw stderr,
+including a temp path and a memory address, becomes the job's error. Reported
+before fixing.
+
+**Interview questions:**
+1. *Which errors should a job queue retry?* Transient ones (throttling,
+   timeouts, network) with backoff and a cap; never permanent ones (bad input,
+   validation): fail them once, tell the user what to do, delete the message.
+2. *Why not return a tool's stderr to users?* It's unclear to them and can leak
+   internals (paths, versions, memory addresses). Map known cases to messages,
+   log the raw output for operators, and show a generic fallback otherwise.
+
+### Test 4 — DLQ and alerting
+
+**What we built:** Drill 4 sends a non-S3 message to the jobs queue. The worker
+failed it 3 times, 300 s apart; SQS moved it to the DLQ 18.5 minutes after it
+was sent; the DLQ alarm went to ALARM ~3 minutes later and back to OK ~3
+minutes after the drill purged the DLQ (after checking it held only the
+drill's message).
+
+**Why this way:** A unique marker in the body, plus "refuse to run unless the
+DLQ is empty", means the purge can never remove a real failed message.
+Timings come from the worker log, the queue attributes and the alarm history,
+not from guesses.
+
+**Problems:** The traceback is split into one CloudWatch event per line, so my
+first receive count was doubled; the drill now counts only the final
+`ValueError:` line. The alarm reacts ~3 minutes after the move, not 60 s,
+because SQS metrics reach CloudWatch with a delay.
+
+**Interview questions:**
+1. *When does SQS move a message to the DLQ?* When a receive is attempted on a
+   message whose receive count already exceeds `maxReceiveCount`; so a message
+   that fails 3 times with a 300 s visibility timeout reaches the DLQ ~15
+   minutes after its first receive.
+2. *How do you alert on dead letters?* A CloudWatch alarm on the DLQ's
+   `ApproximateNumberOfMessagesVisible > 0` with an SNS action; expect a few
+   minutes of metric delay, and keep the DLQ's retention longer than your
+   response time.
+
+### Test 5 — API task stopped
+
+**What we built:** Drill 5 probes `/healthz` every 2 s while it stops the only
+API task. Clients saw 10 x 503 (20 s); ECS started a replacement 1 s after
+deregistering the old target, and 200s returned 33 s after the stop.
+
+**Why this way:** Downtime is measured from the client's side (what a user
+sees), and explained from the server's side (target states, ECS service
+events), so the timeline shows where each second goes.
+
+**Problems:** My estimate (1-2 min) was too pessimistic: Fargate started and
+registered the new task in ~20 s. Log lines printed inside the `wait_until`
+probe vanished because the probe's stdout is silenced; they go to stderr now.
+
+**Interview questions:**
+1. *What happens at the load balancer when an ECS task is stopped?* ECS first
+   deregisters the target (draining: no new requests, in-flight ones get the
+   deregistration delay), then sends SIGTERM. With no other healthy target the
+   ALB returns 503 immediately.
+2. *How do you get zero-downtime task replacement?* At least two tasks across
+   AZs, `minimumHealthyPercent = 100` for deployments, health checks and a
+   deregistration delay that match the app's shutdown, so one task always
+   serves while the other is replaced.
+
+### Test 6, run 1 — Step scaling reverts a manual scale-in
+
+**What we built:** Drill 6 ran two workers (one busy with a long job, one
+idle; ECS task protection read `true`/`false` correctly) and forced the
+desired count from 2 to 1. Autoscaling set it back to 2 twelve seconds later;
+the long job finished before any scale-in, so the run was inconclusive. The
+drill was redesigned to let autoscaling perform the scale-in while a ~40-minute
+job is mid-processing (rerun after the fix deploy).
+
+**Why this way:** The production path that matters is autoscaling's own
+scale-in, not a human's; a drill should exercise what really happens.
+
+**Problems:** Step scaling re-applies its adjustment on every alarm
+evaluation (each minute) while the alarm is in ALARM, so a manual desired
+count doesn't stick during a backlog. `describe-log-streams` with a name
+filter only searched the first page of streams; the busy task's stream now
+comes from the job's own "claimed" log event.
+
+**Interview questions:**
+1. *How do you scale an autoscaled ECS service by hand?* Suspend dynamic
+   scaling on the scalable target first (`register-scalable-target
+   --suspended-state DynamicScalingInSuspended/OutSuspended=true`), change the
+   desired count, then resume; otherwise the next alarm evaluation overrides you.
+2. *What does ECS task scale-in protection guarantee?* When the service scales
+   in, ECS won't choose a protected task; it does not stop `StopTask`, a
+   deployment's replacement, or a crash. Protection expires on its own after
+   a set time, so a dead worker can't block scale-in forever.
+
 ### Fixes from the failure drills (attempts, ffprobe errors, UI outages)
 
 **What we built:**
@@ -2750,3 +2952,37 @@ alarm on "gave up" log lines would restore operator visibility.
 2. *How should a polling UI handle errors?* Separate "the resource is gone"
    (stop, explain) from "I couldn't reach the server" (keep the last state,
    retry, and only surface a non-blocking notice after a sustained outage).
+
+### Re-runs after the fixes (1b, 3, 4, 6)
+
+**What we built:** After PR #9 was deployed (plan on main: "No changes"),
+drill 1b's take-over logged `(attempt 2, receive 3)`: the same receive count
+that would have failed the job before is now harmless. Drill 3's text file got
+the clear error, with ffprobe's details only in the WARNING log. Drill 4
+needed 10 receives (54.6 min) before the DLQ instead of 3 (18.5 min); both
+emails arrived. Drill 6, redesigned, showed autoscaling's scale-in stopping
+the idle worker 6 s after its decision while the protected one finished a
+40-minute job.
+
+**Why this way:** Re-running the same drills gives a before/after on the same
+evidence (log lines, receive counts, alarm history), not a claim.
+
+**Problems:**
+- Drill 1b first ran the old worker image: its tag came from `image_tags.sh`
+  on a branch without the fix commits. It now reads the live task definition.
+- A Terraform plan run from the drills branch proposed reverting
+  `maxReceiveCount` to 3: plan from the branch that is deployed (main).
+- `--query` on an auto-paginated AWS CLI call is applied per page (an extra
+  `None`); the third time this bit, so log lookups now parse JSON in Python.
+- The extra SQS receive at first delivery happened again with no ECS worker
+  running, so the run-1 explanation is unproven; the drill now keeps the drill
+  worker's full log to settle it.
+
+**Interview questions:**
+1. *How do you prove a reliability fix works?* Reproduce the failure first
+   with a scripted drill that asserts the outcome, deploy the fix, re-run the
+   same drill, and compare the same evidence before and after.
+2. *What's the trade-off of a higher SQS maxReceiveCount?* Poison messages
+   take longer to reach the DLQ (here ~55 instead of ~18 minutes) and its
+   alarm; in exchange, transient redeliveries don't push real work there. Keep
+   the real retry limit in the application and alert on give-ups separately.
