@@ -12,7 +12,7 @@
     "screenshots": "playwright test"
   },
   "dependencies": {
-    "@fontsource/schibsted-grotesk": "5.3.0",
+    "@fontsource/hanken-grotesk": "5.3.0",
     "react": "19.3.0",
     "react-dom": "19.3.0"
   },

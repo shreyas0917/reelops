@@ -1,27 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { SLOW_QUEUE_MS, caption, failureMessage, phaseFromStatus, stageState, type View } from "./status";
-
-describe("caption", () => {
-  it.each<[View, string]>([
-    [{ phase: "empty" }, "Drop a screen recording here"],
-    [{ phase: "uploading", progress: 42.7 }, "Uploading 42%"],
-    [{ phase: "queued", queuedForMs: 5_000 }, "Waiting for a worker to start"],
-    [{ phase: "processing" }, "Writing captions and voiceover"],
-    [{ phase: "done" }, "Ready to watch"],
-    [{ phase: "failed", error: "The upload link expired." }, "The upload link expired."],
-    [{ phase: "empty", dragging: true }, "Drop to upload"],
-  ])("%o -> %s", (view, text) => {
-    expect(caption(view)).toBe(text);
-  });
-
-  it("explains a slow start after 30 s in the queue", () => {
-    expect(caption({ phase: "queued", queuedForMs: SLOW_QUEUE_MS })).toBe("Waiting for a worker to start");
-    expect(caption({ phase: "queued", queuedForMs: SLOW_QUEUE_MS + 1 })).toBe(
-      "Starting a worker. The first job can take about 3 minutes.",
-    );
-  });
-});
+import { SLOW_QUEUE_MS, chipFor, failureMessage, phaseFromStatus, stageMessage, stepStates } from "./status";
 
 describe("phaseFromStatus", () => {
   it("maps API statuses", () => {
@@ -29,25 +8,46 @@ describe("phaseFromStatus", () => {
     expect(phaseFromStatus("processing")).toBe("processing");
     expect(phaseFromStatus("done")).toBe("done");
     expect(phaseFromStatus("failed")).toBe("failed");
+    expect(phaseFromStatus("something-new")).toBe("queued");
   });
 });
 
-describe("stageState", () => {
-  const states = (view: View) =>
-    (["upload", "queued", "processing", "done"] as const).map((s) => stageState(s, view));
+describe("chipFor", () => {
+  it("shows four user-facing states", () => {
+    expect(chipFor("pending")).toEqual({ label: "Queued", tone: "queued" });
+    expect(chipFor("processing")).toEqual({ label: "Processing", tone: "processing" });
+    expect(chipFor("done")).toEqual({ label: "Ready", tone: "ready" });
+    expect(chipFor("failed")).toEqual({ label: "Failed", tone: "failed" });
+    expect(chipFor("something-new")).toEqual({ label: "Processing", tone: "processing" });
+  });
+});
 
-  it("lights stages in order", () => {
-    expect(states({ phase: "empty" })).toEqual(["todo", "todo", "todo", "todo"]);
-    expect(states({ phase: "uploading" })).toEqual(["active", "todo", "todo", "todo"]);
-    expect(states({ phase: "queued" })).toEqual(["done", "active", "todo", "todo"]);
-    expect(states({ phase: "processing" })).toEqual(["done", "done", "active", "todo"]);
-    expect(states({ phase: "done" })).toEqual(["done", "done", "done", "done"]);
+describe("stepStates", () => {
+  it("lights steps in order", () => {
+    expect(stepStates("empty")).toEqual(["todo", "todo", "todo", "todo"]);
+    expect(stepStates("uploading")).toEqual(["active", "todo", "todo", "todo"]);
+    expect(stepStates("queued")).toEqual(["done", "active", "todo", "todo"]);
+    expect(stepStates("processing")).toEqual(["done", "done", "active", "todo"]);
+    expect(stepStates("done")).toEqual(["done", "done", "done", "done"]);
   });
 
   it("marks where a job failed", () => {
-    expect(states({ phase: "failed", failedAt: "upload" })).toEqual(["failed", "todo", "todo", "todo"]);
-    expect(states({ phase: "failed", failedAt: "processing" })).toEqual(["done", "done", "failed", "todo"]);
-    expect(states({ phase: "failed" })).toEqual(["todo", "todo", "todo", "todo"]); // validation error
+    expect(stepStates("failed", "uploaded")).toEqual(["failed", "todo", "todo", "todo"]);
+    expect(stepStates("failed", "processing")).toEqual(["done", "done", "failed", "todo"]);
+    expect(stepStates("failed")).toEqual(["todo", "todo", "todo", "todo"]); // rejected before upload
+  });
+});
+
+describe("stageMessage", () => {
+  it("shows upload progress as a whole percentage", () => {
+    expect(stageMessage("uploading", { progress: 42.7 }).title).toBe("Uploading 42%");
+  });
+
+  it("explains the worker start after 30 s in the queue", () => {
+    expect(stageMessage("queued", { queuedForMs: SLOW_QUEUE_MS }).title).toBe("Waiting for a worker");
+    const slow = stageMessage("queued", { queuedForMs: SLOW_QUEUE_MS + 1 });
+    expect(slow.title).toBe("Starting a worker");
+    expect(slow.detail).toMatch(/about 3 minutes/);
   });
 });
 
@@ -55,9 +55,11 @@ describe("failureMessage", () => {
   it("turns worker errors into what happened and what to do", () => {
     expect(failureMessage("input.mp4 has no audio stream. ReelOps needs...")).toMatch(/no sound.*microphone on/);
     expect(failureMessage("no speech detected in input.mp4")).toMatch(/No speech.*Narrate/);
+    expect(failureMessage("upload too large: 300 bytes")).toMatch(/over 200 MB.*Trim/);
+    expect(failureMessage("x.mp4 isn't an MP4, MOV or WebM video")).toMatch(/Export it as MP4/);
     expect(failureMessage("gave up after 3 attempts: boom")).toMatch(/failed three times/);
     expect(failureMessage("weird")).toBe("Processing failed: weird");
-    expect(failureMessage(null)).toMatch(/Drop the recording again/);
+    expect(failureMessage(null)).toMatch(/Upload the recording again/);
   });
 
   it("never apologises", () => {

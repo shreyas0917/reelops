@@ -8,15 +8,26 @@ export interface CreatedJob {
   expires_in: number;
 }
 
+/** One burned-in caption, in seconds from the start of the video. */
+export interface Segment {
+  start: number;
+  end: number;
+  text: string;
+}
+
 export interface Job {
   job_id: string;
   status: "pending" | "processing" | "done" | "failed";
+  filename: string | null; // sanitized upload name; null for jobs from before it was stored
   error: string | null;
   attempts: number;
   created_at: number;
   updated_at: number;
   download_url: string | null;
   preview_url: string | null;
+  original_preview_url: string | null; // the raw upload, once done
+  segments: Segment[]; // empty until done
+  voice: string | null; // Polly voice used, once done
 }
 
 /** An error whose message is already written for the user. */
