@@ -23,6 +23,9 @@ class Settings:
     whisper_model_dir: str | None = None
     # Spoken language of the input; None lets Whisper auto-detect.
     language: str | None = "en"
+    # Words Whisper should prefer when the audio is ambiguous, e.g. product
+    # names it would otherwise split ("ReelOps" -> "Reel Ops"). None = no hint.
+    whisper_hotwords: str | None = None
 
     # Voice-over (Amazon Polly)
     polly_voice: str = "Kajal"
@@ -104,6 +107,7 @@ class Settings:
             whisper_device=get("REELOPS_WHISPER_DEVICE", d.whisper_device),
             whisper_compute_type=get("REELOPS_WHISPER_COMPUTE_TYPE", d.whisper_compute_type),
             whisper_model_dir=get("REELOPS_WHISPER_MODEL_DIR", d.whisper_model_dir),
+            whisper_hotwords=get("REELOPS_WHISPER_HOTWORDS", d.whisper_hotwords),
             # "auto" means let Whisper detect the language.
             language=None if language == "auto" else language,
             polly_voice=get("REELOPS_POLLY_VOICE", d.polly_voice),

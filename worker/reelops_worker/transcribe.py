@@ -39,7 +39,9 @@ def transcribe(wav: Path, settings: Settings, model: WhisperModel | None = None)
     model = model or load_model(settings)
     # vad_filter skips silence, which is faster and stops Whisper from
     # hallucinating text over quiet stretches.
-    raw_segments, info = model.transcribe(str(wav), language=settings.language, vad_filter=True)
+    raw_segments, info = model.transcribe(
+        str(wav), language=settings.language, vad_filter=True, hotwords=settings.whisper_hotwords
+    )
     # raw_segments is a lazy generator: the actual transcription happens here.
     segments = [Segment(s.start, s.end, s.text.strip()) for s in raw_segments if s.text.strip()]
     log.info(
