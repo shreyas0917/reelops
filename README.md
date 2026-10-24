@@ -1,5 +1,8 @@
 # ReelOps
 
+[![CI](https://github.com/shreyas0917/reelops/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/shreyas0917/reelops/actions/workflows/ci.yml)
+[![Terraform](https://github.com/shreyas0917/reelops/actions/workflows/terraform.yml/badge.svg?branch=main)](https://github.com/shreyas0917/reelops/actions/workflows/terraform.yml)
+
 Turn a screen recording into a captioned, AI-voiced demo video.
 
 **Stack:** Python 3.12 · FastAPI · faster-whisper · Amazon Polly · ffmpeg · Docker ·
@@ -7,9 +10,11 @@ Terraform · AWS ECS Fargate · S3 · SQS · DynamoDB · GitHub Actions — regi
 
 ## Status
 
-Phases 0–6 done: video pipeline worker, queue-driven API + worker, ECS Fargate
-behind an ALB, worker autoscaling on SQS backlog (0–3 tasks), and a web UI
-served by the API.
+Phases 0–7 done: video pipeline worker, queue-driven API + worker, ECS Fargate
+behind an ALB, worker autoscaling on SQS backlog (0–3 tasks), a web UI served
+by the API, and CI/CD with GitHub Actions: lint, tests and Trivy scans on every
+PR, a Terraform plan comment on PRs, and an approval-gated deploy from `main`
+through GitHub OIDC (no stored AWS keys).
 
 ## Web UI
 
