@@ -21,11 +21,14 @@ resource "aws_sqs_queue" "jobs" {
   # AWS-managed aws/sqs KMS key.
   sqs_managed_sse_enabled = true
 
-  # After 3 receives without a delete, park the message in the DLQ so a
-  # poison message can't loop forever.
+  # After 10 receives without a delete, park the message in the DLQ so a
+  # message no worker can handle (malformed, never claimed) can't loop
+  # forever. Not the job retry limit: the worker gives a job up after 3 real
+  # attempts (max_attempts, counted on the job item), because SQS also counts
+  # harmless receives (released during scale-in, handed back on SIGTERM).
   redrive_policy = jsonencode({
     deadLetterTargetArn = aws_sqs_queue.jobs_dlq.arn
-    maxReceiveCount     = 3
+    maxReceiveCount     = 10
   })
 }
 

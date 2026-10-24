@@ -48,7 +48,11 @@ class Settings:
     max_input_bytes: int = 200 * 1024 * 1024
     # Must match the SQS queue (terraform/main/sqs.tf).
     visibility_timeout: int = 300
-    max_receives: int = 3
+    # Real attempts (claims, counted on the job item) before a job is given up.
+    # Not SQS's receive count: that also counts harmless releases (scale-in,
+    # SIGTERM hand-backs). The queue's maxReceiveCount (10) is only a backstop
+    # for messages that are never claimed.
+    max_attempts: int = 3
     heartbeat_seconds: int = 60
     # Shorter than the visibility timeout on purpose: a dead worker's lease must
     # be stale before its message reappears, or the redelivery would see a
