@@ -19,9 +19,10 @@ deletes exactly those afterwards. Account IDs are shown as `<account-id>`.
 | 5. API task stopped | PASS (single task: 20 s outage); UI finding (transient 503 shown as a failed job) fixed in PR #9 | 503 for 20 s; 200 again 33 s after the stop |
 | 6. Scale-in protection (run 1: manual scale-in) | INCONCLUSIVE; finding: step scaling reverts manual desired-count changes | n/a |
 | 6. Scale-in protection (run 2: autoscaling scale-in) | PASS (drill script, clean re-run) | idle task stopped 3 s after the scale-in decision; protected 40-min job finished, attempts=1; workers at 0 by autoscaling |
+| 7. Give-up alarm (one injected give-up line) | PASS (ALARM and OK notifications sent; email receipt to confirm) | ALARM 46 s after the line was written; OK 6 min after the ALARM |
 
-Relevant settings: SQS visibility timeout 300 s, `maxReceiveCount` 3 (then
-the DLQ), job lease 240 s, heartbeat every 60 s, worker shutdown grace 20 s,
+Relevant settings: SQS visibility timeout 300 s, `maxReceiveCount` 3 before
+PR #9 and 10 after (then the DLQ), job lease 240 s, heartbeat every 60 s, worker shutdown grace 20 s,
 ECS `stopTimeout` 30 s, worker autoscaling 0-3 on queue backlog.
 
 ## 0. Pre-flight finding: a dev-box worker on the live queue
@@ -322,11 +323,11 @@ downtime; estimate 1-2 minutes.
 **Actual:** 20 s of 503s, shorter than estimated.
 
 ```
-14:00:27 baseline: 5 probes, all 200; targets: 10.20.0.228:healthy
+14:00:27 baseline: 5 probes, all 200; targets: <old-task-ip>:healthy
 14:00:28 stop-task sent to API task 0adcbdee...
-14:00:40 targets: 10.20.0.228:draining
-14:01:02 targets: 10.20.0.221:healthy 10.20.0.228:draining
-14:01:13 targets: 10.20.0.221:healthy
+14:00:40 targets: <old-task-ip>:draining
+14:01:02 targets: <new-task-ip>:healthy <old-task-ip>:draining
+14:01:13 targets: <new-task-ip>:healthy
 probes:
 14:00:38 200   14:00:40 503 ... 14:00:59 503 (10 x 503, ~2 ms each)   14:01:01 200
 ECS service events:
@@ -608,3 +609,46 @@ finished on its first attempt, and its worker turned protection on at the
 claim and off the moment the job was done. Autoscaling kept control
 throughout (never suspended) and scaled to zero ~12 minutes after the last
 job. The drill script now proves this end to end on its own.
+
+## 7. Give-up alarm (end to end)
+
+**Goal:** Since PR #9 a job that uses up its 3 real attempts is failed and its
+message deleted, so it never reaches the DLQ alarm. The give-up alarm (PR #13)
+must email when a worker gives up, and email again when it clears.
+
+**How it was run:** After PR #13 was deployed, the drill confirmed the metric
+filter (`reelops-dev-worker-gave-up`, pattern `?"; giving up" ?"attempts that
+never finished"`, metric `ReelOps/WorkerGaveUp`, value 1, default 0) and the
+alarm (Sum >= 1 over 60 s, 1 period, missing data = not breaching, email on
+ALARM and OK) existed, waited for the new alarm to settle to OK, then wrote
+**one** give-up line in the worker's exact format into a separate log stream
+(`chaos-giveup-test`) in `/reelops/dev/worker` with `aws logs put-log-events`,
+and deleted the stream afterwards. Before deploying, the pattern was checked
+with `aws logs test-metric-filter`: it matched 3 of 3 real give-up lines (both
+give-up paths) and 0 of 14 other real worker lines.
+
+**Expected:** The metric records 1 for that minute; the alarm goes to ALARM
+within about a minute and back to OK once no more matches arrive; one email
+for each transition.
+
+**Actual:** As expected.
+
+```
+18:16:38 UTC alarm settled: INSUFFICIENT_DATA -> OK (new alarm's first evaluation)
+18:16:54 UTC wrote 1 line to /reelops/dev/worker/chaos-giveup-test:
+  ... ERROR   reelops_worker.consumer: job chaos-giveup-test-8f30b6b6-...: failed on final attempt 3; giving up
+metric ReelOps/WorkerGaveUp: 2026-10-24T18:16:00Z Sum 1.0
+alarm history:
+2026-10-24T18:17:37 Alarm updated from OK to ALARM   (23:47:37 IST)
+2026-10-24T18:23:37 Alarm updated from ALARM to OK   (23:53:37 IST)
+test stream deleted; alarm OK
+```
+
+The alarm published to the SNS alerts topic on both transitions (its email
+subscription is confirmed); receipt of these two emails is still to be
+confirmed by the recipient.
+
+**What it proves:** A give-up anywhere in the worker reaches a human by email
+within about a minute, without waiting for the DLQ. Recovery to OK took 6
+minutes, not 1: for a sparse metric CloudWatch waits several periods for late
+data before it treats the window as clear.
