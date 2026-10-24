@@ -2616,3 +2616,54 @@ phone shot is ~5000 px tall and would swamp the row.
 2. *Why does seeking need HTTP Range support?* Browsers fetch media in byte
    ranges; without `Accept-Ranges`/206 responses the media isn't seekable, so
    setting `currentTime` goes nowhere (S3 supports ranges, a naive mock doesn't).
+
+### Step 3b — A realistic screenshot video
+
+**What we built:** `scripts/make_ui_fixture.sh` now produces the screenshot
+video from scratch: Playwright records a timed walkthrough of an invented app
+("Fernhill Billing", `scripts/ui-fixture/fernhill.html`) at 1280x720, Polly
+narrates each step, ffmpeg muxes a realistic screen recording, and the real
+worker pipeline turns it into the captioned, re-voiced output. Its real
+segments, duration and voice go to `fixture.json`, which the Playwright spec
+reads. Screenshots show a paused frame with native controls hidden. The worker
+gained an optional `REELOPS_WHISPER_HOTWORDS` setting (default: none).
+
+**Why this way:**
+- One timeline file (`walkthrough.json`) drives both the cursor actions and
+  the narration, so speech and screen can't drift apart; the script fails if
+  a sentence is longer than its slot.
+- Playwright's video has no pointer, so the page draws its own cursor and
+  click ripple; the cursor glides with easing instead of jumping.
+- The spec reads `fixture.json` instead of hard-coding captions, so a rebuilt
+  fixture can't silently disagree with the tests.
+- Northwind (the suggested name) is Microsoft's sample company, a real brand:
+  an invented name and example.com addresses instead.
+
+**Problems:**
+- Whisper `base` never writes "ReelOps": every phrasing tried came out as
+  "Reel Ops", "real ops" or "Reel-ops", so rephrasing couldn't fix it.
+  faster-whisper's `hotwords` hint does, so it's now a worker setting, off by
+  default (users' videos are unchanged) and set only for the fixture run.
+- The hint has side effects: with "ReelOps" it lower-cased "Studio North";
+  with "ReelOps, Studio North" Whisper merged sentences into captions that
+  broke mid-sentence. Kept the one-word hint and accepted the lower case.
+- Changing the first sentence (or lengthening pauses) also made Whisper merge
+  it with the next one: segmentation is the model's choice, not pause length.
+- A spoken invented name ("Fernhill") came out as "Furnill": it's shown on
+  screen, not spoken.
+- Downscaling the fixture to 960 px made the burned-in captions' word gaps
+  disappear; it's now encoded at its native 1280x720.
+- A light video on a white card had no edge: `outline` on the player, which
+  paints above the video (a border or inset shadow would sit under it).
+- The `steps` helper failed inside a process substitution and `set -e` didn't
+  stop the script; it now checks it actually read steps.
+
+**Interview questions:**
+1. *How do you get a speech-to-text model to spell a product name right?*
+   Give it a vocabulary hint (Whisper: `hotwords` / `initial_prompt`), and
+   test the side effects: hints can change casing and segmentation elsewhere,
+   so keep them short and opt-in.
+2. *Why generate test fixtures with a script instead of committing them?*
+   The script is the documentation: anyone can rebuild the media (here from
+   an invented app, so no personal data), changes are reviewable as code, and
+   large binaries stay out of git.

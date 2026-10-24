@@ -30,8 +30,10 @@ straight to S3 with a presigned URL; the API only handles small JSON.
   <img src="docs/ui-processing.png" width="40%" alt="Desktop: a job processing, with the four-step progress row">
 </p>
 
-Screenshots come from Playwright against a mocked API (`frontend/e2e/`); the
-video is ReelOps' own output for the synthetic test-pattern sample.
+Screenshots come from Playwright against a mocked API (`frontend/e2e/`). The
+video is real ReelOps output: a scripted walkthrough of an invented billing app,
+narrated with Polly and run through the worker pipeline
+(`scripts/make_ui_fixture.sh`).
 
 ## Autoscaling
 
