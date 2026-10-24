@@ -2431,3 +2431,27 @@ which should be ignored in `dependabot.yml`, not merged.
 2. *Should every PR get a cloud plan?* Only PRs from trusted authors: plans run
    with real (read-only) credentials, and untrusted code (forks, dependency
    bumps) shouldn't get them. The merge to main still plans before apply.
+
+### Step 9 follow-up — No AWS plan for untrusted PRs
+
+**What we built:** The Terraform `plan` job now runs only for PRs opened by a
+person from this repo (not `dependabot[bot]`, not a fork). Dependabot ignores
+TypeScript major updates; PR #2 (TypeScript 7) was closed unmerged.
+
+**Why this way:** A plan uses real AWS credentials, and Dependabot/fork code is
+untrusted until reviewed. Skipping is safe because the six CI checks still
+gate the PR and `plan-main` plans again before the deploy approval. The
+alternative (a Dependabot copy of the role ARN secret) would hand a bot that
+runs `npm install` scripts read access to the account. The condition uses the
+PR author, not `github.actor`, which changes when a human re-runs the job.
+
+**Problems:** None beyond the diagnosis in Step 9; actionlint and the
+Dependabot JSON schema both validated the change before pushing.
+
+**Interview questions:**
+1. *Why check `head.repo.full_name == github.repository`?* It's true only for
+   PRs from branches in this repo; a fork PR has the fork's name there, so it
+   skips jobs that need secrets or OIDC instead of failing on them.
+2. *How do you stop Dependabot proposing a major upgrade you're not ready for?*
+   An `ignore` rule with `update-types: ["version-update:semver-major"]` for
+   that dependency; minor and patch updates (and security updates) continue.
