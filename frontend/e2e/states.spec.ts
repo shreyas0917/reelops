@@ -167,14 +167,20 @@ async function shot(page: Page, name: string) {
 }
 
 /**
- * A viewport-sized image for the README (full-page phone shots are ~5000 px
- * tall). Written next to the other screenshots; copied to docs/ by hand.
+ * The README image: the first-visit screen at 1280 px, cropped just below the
+ * upload and "How it works" cards (so "Your videos" stays out). Written next
+ * to the other screenshots; copied to docs/ui.png by hand.
  */
-async function docsShot(page: Page, project: string, file: string, size: { width: number; height: number }) {
-  if (test.info().project.name !== project) return;
-  await page.setViewportSize(size);
-  await page.evaluate(() => window.scrollTo(0, 0));
-  await page.screenshot({ path: `screenshots/docs-${file}`, animations: "disabled" });
+async function readmeShot(page: Page) {
+  if (test.info().project.name !== "1280") return;
+  const bottom = await page
+    .locator(".upload, .how")
+    .evaluateAll((els) => Math.max(...els.map((el) => el.getBoundingClientRect().bottom + window.scrollY)));
+  await page.screenshot({
+    path: "screenshots/docs-ui.png",
+    clip: { x: 0, y: 0, width: 1280, height: Math.ceil(bottom) + 16 },
+    animations: "disabled",
+  });
 }
 
 const stageTitle = (page: Page) => page.locator(".screen__title");
@@ -188,6 +194,7 @@ test("first visit", async ({ page }) => {
   await expect(page.locator(".how__steps li")).toHaveCount(4);
   await expect(page.locator(".videos__empty")).toBeVisible();
   await shot(page, "first-visit");
+  await readmeShot(page);
 });
 
 test("uploading", async ({ page }) => {
@@ -229,7 +236,6 @@ test("processing", async ({ page }) => {
   expect(states).toEqual(["done", "done", "active", "todo"]);
   expect((await chips(page))[0]).toBe("Processing");
   await shot(page, "processing");
-  await docsShot(page, "1280", "ui-processing.png", { width: 1280, height: 1100 });
 });
 
 test("ready", async ({ page }) => {
@@ -262,8 +268,6 @@ test("ready, playing: the caption track follows playback", async ({ page }) => {
   await expect(page.locator('.track__block[data-active="true"]')).toHaveText(SEGMENTS[SHOT].text);
   await hideControls(page);
   await shot(page, "ready-playing");
-  await docsShot(page, "1280", "ui.png", { width: 1280, height: 1100 });
-  await docsShot(page, "380", "ui-mobile.png", { width: 380, height: 800 });
   await video.evaluate((v: HTMLVideoElement, t: number) => (v.currentTime = t), SEGMENTS[SEGMENTS.length - 1].end + 0.5);
   await expect(page.locator('.track__block[data-active="true"]')).toHaveCount(0);
 });
