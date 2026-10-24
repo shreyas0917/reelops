@@ -27,7 +27,10 @@ require_only_ecs_workers
 
 # The deployed worker image, so the crash happens in production code.
 REPO=$(terraform -chdir=terraform/main output -json ecr_repository_urls | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["worker"])')
-TAG=$(scripts/image_tags.sh | sed -n 's/^worker=//p')
+# From the live task definition, not scripts/image_tags.sh: that reads this
+# checkout's git history, which may not be what's deployed.
+TAG=$(aws ecs describe-task-definition --task-definition "$WORKER_SERVICE" \
+  --query 'taskDefinition.containerDefinitions[0].image' --output text | sed 's/.*://')
 aws ecr get-login-password | docker login --username AWS --password-stdin "${REPO%%/*}" >/dev/null
 docker pull -q "$REPO:$TAG" >/dev/null
 log "drill worker image: reelops-worker:$TAG (the deployed tag)"
