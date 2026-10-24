@@ -94,6 +94,12 @@ log "attempts=$attempts outputs=$outputs first-owner=$owner final-owner=$new_own
 log "timings: kill->visible=$(( ${t_visible:-$t_reclaim} - t_kill ))s claim->reclaim=$((t_reclaim - t_claim))s kill->done=$((t_done - t_kill))s total=$((t_done - t_submit))s"
 
 [ "$attempts" = 2 ] || fail "attempts=$attempts, expected 2"
+# Since the drill fixes the claim line shows both counts; the take-over must
+# be attempt 2 whatever SQS's receive count says.
+takeover=$(worker_log "$JOB" "$since_ms" | grep -m1 "claimed by" || true)
+if grep -q "attempt " <<<"$takeover"; then
+  grep -q "(attempt 2," <<<"$takeover" || fail "take-over isn't attempt 2: $takeover"
+fi
 [ "$outputs" = 1 ] || fail "$outputs output objects, expected 1"
 [[ "$new_owner" != "$DRILL_HOST"-* ]] || fail "final owner is the drill worker"
 [ $((t_reclaim - t_claim)) -ge 240 ] || fail "taken over after $((t_reclaim - t_claim))s, before the 240 s lease could expire"

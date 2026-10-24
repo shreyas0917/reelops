@@ -3,10 +3,11 @@
 #
 # A non-S3 message makes parse_event() raise; the worker logs "unhandled error;
 # message left for retry" and doesn't delete it. SQS redelivers it after each
-# 300 s visibility timeout; after maxReceiveCount (3) receives it moves to the
-# DLQ, and the DLQ alarm goes to ALARM (email via SNS). The drill then checks
-# the DLQ holds only its own message, purges it, and waits for the alarm to
-# return to OK. Takes ~20-25 minutes.
+# 300 s visibility timeout; after maxReceiveCount receives (read from the
+# queue: 3 before the drill fixes, 10 after) it moves to the DLQ, and the DLQ
+# alarm goes to ALARM (email via SNS). The drill then checks the DLQ holds only
+# its own message, purges it, and waits for the alarm to return to OK.
+# Takes ~(maxReceiveCount x 5 + 8) minutes: ~23 with 3, ~58 with 10.
 #
 # Safety: aborts if the DLQ isn't empty at the start; purges only after
 # confirming the DLQ's single message carries this run's marker.
@@ -23,6 +24,9 @@ dlq_count() {
 }
 
 [ "$(dlq_count)" = 0 ] || fail "DLQ is not empty; refusing to run (it may hold real failed messages)"
+MAX_RECEIVES=$(queue_attr "$QUEUE" RedrivePolicy | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["maxReceiveCount"])')
+VISIBILITY=$(queue_attr "$QUEUE" VisibilityTimeout)
+log "queue: maxReceiveCount=$MAX_RECEIVES, visibility timeout ${VISIBILITY}s"
 log "DLQ empty; alarm $ALARM is $(alarm_state)"
 
 MARKER="chaos-drill-$(cat /proc/sys/kernel/random/uuid)"
@@ -33,7 +37,7 @@ aws sqs send-message --queue-url "$QUEUE" --message-body "$BODY" >/dev/null
 log "sent malformed message (marker $MARKER)"
 
 in_dlq() { [ "$(queue_attr "$DLQ" ApproximateNumberOfMessages)" != 0 ]; }
-wait_until 1500 "message moved to the DLQ" in_dlq
+wait_until $(((MAX_RECEIVES + 1) * VISIBILITY + 600)) "message moved to the DLQ" in_dlq
 t_dlq=$(epoch)
 log "message in the DLQ $((t_dlq - t_send))s after sending"
 
@@ -73,5 +77,5 @@ aws cloudwatch describe-alarm-history --alarm-name "$ALARM" --history-item-type 
   --start-date "$(date -u -d "@$t_send" +%FT%TZ)" --query 'AlarmHistoryItems[].[Timestamp,HistorySummary]' --output text | sort
 echo "----"
 
-[ "$receives" = 3 ] || fail "worker logged $receives failed receives, expected 3"
-pass "3 receives, in the DLQ $((t_dlq - t_send))s after sending, alarm ALARM $((t_alarm - t_dlq))s later; purged, alarm OK $((t_ok - t_purge))s after the purge"
+[ "$receives" = "$MAX_RECEIVES" ] || fail "worker logged $receives failed receives, expected $MAX_RECEIVES"
+pass "$receives receives, in the DLQ $((t_dlq - t_send))s after sending, alarm ALARM $((t_alarm - t_dlq))s later; purged, alarm OK $((t_ok - t_purge))s after the purge"
