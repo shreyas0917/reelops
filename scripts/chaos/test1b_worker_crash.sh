@@ -65,8 +65,10 @@ sleep 20 # mid-job, before the first 60 s heartbeat
 job_is "$JOB" processing || fail "job left processing before the kill: $(job_summary "$JOB")"
 docker kill -s KILL "$DRILL" >/dev/null
 t_kill=$(epoch)
-log "drill worker SIGKILLed $((t_kill - t_claim))s after the claim; its last log lines:"
-docker logs "$DRILL" 2>&1 | tail -3 | sed 's/^/    /'
+DRILL_LOG="$STATE/test1b-drill-worker-$JOB.log"
+docker logs "$DRILL" >"$DRILL_LOG" 2>&1 || true
+log "drill worker SIGKILLed $((t_kill - t_claim))s after the claim; full log in $DRILL_LOG; its claim and last lines:"
+{ grep "claimed by" "$DRILL_LOG" || true; tail -2 "$DRILL_LOG"; } | sed 's/^/    /'
 remove_drill_worker
 
 # Recovery timeline: the message reappears, then an ECS worker takes the stale lease.
