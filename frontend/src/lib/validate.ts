@@ -28,7 +28,7 @@ export function validateFile(name: string, size: number): Validation {
   const contentType = CONTENT_TYPES[ext];
   if (!contentType) {
     const what = ext ? `That file is a .${ext}.` : "That file has no extension.";
-    return { ok: false, error: `${what} Choose an mp4, mov or webm recording.` };
+    return { ok: false, error: `${what} Choose an MP4, MOV or WebM recording.` };
   }
   if (size <= 0) {
     return { ok: false, error: "That file is empty. Choose a recording with narration." };

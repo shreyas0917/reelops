@@ -14,7 +14,7 @@ describe("validateFile", () => {
   it("rejects other types and says which ones work", () => {
     expect(validateFile("talk.avi", 1000)).toEqual({
       ok: false,
-      error: "That file is a .avi. Choose an mp4, mov or webm recording.",
+      error: "That file is a .avi. Choose an MP4, MOV or WebM recording.",
     });
   });
 
