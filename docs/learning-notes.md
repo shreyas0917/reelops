@@ -2986,3 +2986,45 @@ evidence (log lines, receive counts, alarm history), not a claim.
    take longer to reach the DLQ (here ~55 instead of ~18 minutes) and its
    alarm; in exchange, transient redeliveries don't push real work there. Keep
    the real retry limit in the application and alert on give-ups separately.
+
+## Phase 9 — Hardening and polish
+
+### Task 1 — Image tags come from the commit, never a stale file
+
+**What we built:** Terraform computes the image tags itself
+(`data "external" "image_tags"` runs `scripts/image_tags.sh --json`), so a
+plain `terraform plan` on a commit means "deploy this commit"; the
+`api_image_tag`/`worker_image_tag` variables are now optional overrides. The
+git-ignored `images.auto.tfvars` is gone. `image_tags.sh` counts only paths
+that go into each image (no `*.md`, tests or dev requirements), and
+`scripts/test_image_tags.sh` (run in CI) proves which tag each kind of path
+moves. The Terraform workflow no longer passes `-var` image tags (they could
+disagree with the data source); its plan and deploy jobs check out full
+history (`fetch-depth: 0`), and the deploy job pushes images tagged by the
+same script on the same commit as the reviewed plan.
+
+**Why this way:** A pause plan after a docs-only merge wanted to "change" both
+images to Phase 7 tags. The cause was not the path rules: `image_tags.sh`
+gave the live tags. Terraform auto-loaded `images.auto.tfvars`, written only
+by `push_images.sh`; since deploys moved to CI it was never rewritten, so any
+local plan or apply would have rolled both services back. Computing the tags
+in Terraform removes the second source of truth instead of adding a step to
+keep it fresh. Alternatives: a wrapper script that regenerates the file (one
+more thing to forget), or reading the running task definition (circular).
+
+**Problems:** The first test version compared every commit with a fixed
+baseline, so one wrong rule failed every later line; each check now compares
+with the tags just before its commit. Run against the old script, it fails
+exactly the five real gaps (README.md and NOTES.md files inside image
+folders, worker tests and dev requirements). Removing the stale file was part
+of the fix: a `*.auto.tfvars` value overrides a variable's default.
+
+**Interview questions:**
+1. *Why can a git-ignored, auto-loaded tfvars file be dangerous?* It's
+   invisible state: Terraform reads it silently, nothing in git shows it, and
+   when the process that writes it moves elsewhere (CI), it goes stale and
+   plans silently drift back to old values.
+2. *How do you keep deploys from rebuilding on irrelevant changes?* Derive
+   each image's version from the commits that touch its build inputs (its
+   Dockerfile's sources and context), exclude tests and docs, and test the
+   rule itself.
