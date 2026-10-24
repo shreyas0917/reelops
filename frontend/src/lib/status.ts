@@ -1,7 +1,8 @@
 // Maps where a job is to what the page shows: the stage message, the
 // four-step progress row and the status chip in "Your videos".
 
-export type Phase = "empty" | "uploading" | "queued" | "processing" | "done" | "failed";
+// "loading": a job opened from a link or a reload, status not known yet.
+export type Phase = "empty" | "loading" | "uploading" | "queued" | "processing" | "done" | "failed";
 export type StepId = "uploaded" | "waiting" | "processing" | "ready";
 export type StepState = "todo" | "active" | "done" | "failed";
 
@@ -96,6 +97,8 @@ export function stageMessage(phase: Phase, opts: { progress?: number; queuedForM
       return { title: "Ready" };
     case "failed":
       return { title: "This video didn't finish" };
+    case "loading":
+      return { title: "Loading this video" };
     case "empty":
       return { title: "Drop a screen recording" };
   }

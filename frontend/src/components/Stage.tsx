@@ -18,6 +18,7 @@ interface Props {
   queuedForMs: number;
   error?: string;
   failedAt?: StepId;
+  connectionTrouble?: boolean; // ~30 s of failed polls; still polling
   onDuration: (seconds: number) => void;
   onReset: () => void;
   onCopyLink: () => Promise<boolean>;
@@ -55,6 +56,12 @@ export function Stage(props: Props) {
         </div>
         {done && <SourceToggle value={source} originalAvailable={Boolean(job.original_preview_url)} onChange={switchSource} />}
       </header>
+
+      {props.connectionTrouble && (
+        <p className="notice" role="status">
+          Having trouble reaching ReelOps. Still trying…
+        </p>
+      )}
 
       {/* Announce phase changes once, not every upload percentage. */}
       <p className="visually-hidden" role="status" aria-live="polite">
