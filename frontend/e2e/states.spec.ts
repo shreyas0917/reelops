@@ -1,35 +1,68 @@
-import { appendFileSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 
 import { expect, test, type Page } from "@playwright/test";
 
 const JOB_ID = "6f1d2c3a-4b5e-4f60-8a71-92b3c4d5e6f7";
 const NOW = Date.now();
 const H = 3600_000;
+const FILE = "billing-settings-walkthrough.mp4";
+// 29 s, 960x540 VP9/Opus (Playwright's Chromium has no H.264): ReelOps' own output for
+// samples/synthetic.mp4 (scripts/make_sample.sh), a narrated test pattern.
+// Git-ignored; rebuild it with scripts/make_ui_fixture.sh.
+const VIDEO = readFileSync("e2e/fixtures/done.webm");
 
-// Realistic recent jobs, so the list isn't empty in the screenshots.
+// Realistic history, so "Your videos" isn't empty (except on a first visit).
 const SEEDED = [
-  { id: "a1", title: "billing-settings-walkthrough.mp4", status: "failed", createdAt: NOW - 3 * H },
-  { id: "a2", title: "onboarding-tour.mov", status: "done", createdAt: NOW - 26 * H },
-  { id: "a3", title: "q3-roadmap-demo.webm", status: "done", createdAt: NOW - 4 * 24 * H },
+  { id: "a2", title: "onboarding-tour.mov", status: "done", createdAt: NOW - 26 * H, durationS: 94 },
+  { id: "a3", title: "q3-roadmap-demo.webm", status: "failed", createdAt: NOW - 4 * 24 * H },
+  { id: "a4", title: "team-invites.mp4", status: "done", createdAt: NOW - 6 * 24 * H, durationS: 47 },
+];
+
+// The captions burned into the fixture, from the worker's own transcribe +
+// build_captions run on samples/synthetic.mp4 ("from peg" is Whisper's, for FFmpeg).
+const SEGMENTS = [
+  { start: 0.0, end: 2.0, text: "Welcome to Reel Ops." },
+  { start: 2.0, end: 7.0, text: "In this demo, we upload a screen recording and let the pipeline do the rest." },
+  { start: 7.0, end: 12.0, text: "First, the worker extracts the audio and transcribes it with whisper." },
+  { start: 12.0, end: 18.23, text: "Next, it writes captions and asks Amazon Polly for a fresh voiceover, one sentence" },
+  { start: 18.23, end: 19.0, text: "at a time." },
+  { start: 19.0, end: 24.0, text: "Finally, from peg burns and the captions and swaps in the new audio." },
+  { start: 24.0, end: 28.0, text: "The result is a polished demo video, ready to share." },
 ];
 
 const job = (status: string, extra: Record<string, unknown> = {}) => ({
   job_id: JOB_ID,
   status,
+  filename: FILE,
   error: null,
   attempts: status === "pending" ? 0 : 1,
-  created_at: Math.floor(NOW / 1000),
+  created_at: Math.floor(NOW / 1000) - 190,
   updated_at: Math.floor(NOW / 1000),
   download_url: null,
   preview_url: null,
+  original_preview_url: null,
+  segments: [],
+  voice: null,
   ...extra,
 });
 
+const DONE = job("done", {
+  preview_url: "https://mock-media.example/preview.webm",
+  download_url: "https://mock-media.example/download.mp4",
+  original_preview_url: "https://mock-media.example/original.webm",
+  segments: SEGMENTS,
+  voice: "Kajal",
+});
+
 /** Mock the API and the S3 upload; `upload` = "hold" stops at 42%. */
-async function setup(page: Page, upload: "hold" | "complete", jobJson?: object) {
+async function setup(page: Page, opts: { upload?: "hold" | "complete"; jobJson?: object; seeded?: object[] } = {}) {
+  const { upload = "complete", jobJson, seeded = SEEDED } = opts;
   await page.addInitScript(
     ({ seeded, mode }) => {
-      localStorage.setItem("reelops.recent", JSON.stringify(seeded));
+      if (!sessionStorage.getItem("seeded")) {
+        localStorage.setItem("reelops.recent", JSON.stringify(seeded));
+        sessionStorage.setItem("seeded", "1");
+      }
       // Fake XHR for the presigned PUT: report 42%, then hold or finish.
       class FakeXHR {
         upload: { onprogress: ((e: ProgressEvent) => void) | null } = { onprogress: null };
@@ -52,7 +85,7 @@ async function setup(page: Page, upload: "hold" | "complete", jobJson?: object) 
       }
       (window as unknown as { XMLHttpRequest: unknown }).XMLHttpRequest = FakeXHR;
     },
-    { seeded: SEEDED, mode: upload },
+    { seeded, mode: upload },
   );
   await page.route("**/jobs", (route) =>
     route.fulfill({
@@ -67,135 +100,237 @@ async function setup(page: Page, upload: "hold" | "complete", jobJson?: object) 
     }),
   );
   if (jobJson) await page.route(`**/jobs/${JOB_ID}`, (route) => route.fulfill({ json: jobJson }));
-  await page.route("https://mock-media.example/**", (route) =>
-    route.fulfill({ body: readFileSync("e2e/fixtures/done.webm"), contentType: "video/webm" }),
-  );
-}
-
-async function pickFile(page: Page) {
-  await page.locator('input[type="file"]').setInputFiles({
-    name: "product-tour-final.mp4",
-    mimeType: "video/mp4",
-    buffer: Buffer.alloc(2048),
+  // Media "S3" with Range support: Chrome can only seek a video whose server answers 206.
+  await page.route("https://mock-media.example/**", (route) => {
+    const range = /bytes=(\d+)-(\d*)/.exec(route.request().headers()["range"] ?? "");
+    const headers = { "Accept-Ranges": "bytes", "Content-Type": "video/webm" };
+    if (!range) return route.fulfill({ body: VIDEO, headers });
+    const start = Number(range[1]);
+    const end = range[2] ? Math.min(Number(range[2]), VIDEO.length - 1) : VIDEO.length - 1;
+    return route.fulfill({
+      status: 206,
+      body: VIDEO.subarray(start, end + 1),
+      headers: { ...headers, "Content-Range": `bytes ${start}-${end}/${VIDEO.length}` },
+    });
   });
 }
 
-async function shot(page: Page, name: string) {
-  await page.evaluate(() => document.fonts.ready);
-  // Quality floor: no horizontal scrolling at any width.
-  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
-  expect(overflow, `${name}: page is ${overflow}px wider than the viewport`).toBeLessThanOrEqual(0);
-  // Layout-shift check: the timeline must sit at the same y in every state.
-  const top = await page.locator(".timeline").evaluate((el) => Math.round(el.getBoundingClientRect().top + window.scrollY));
-  appendFileSync("screenshots/positions.txt", `${test.info().project.name} ${name} ${top}\n`);
-  await page.screenshot({ path: `screenshots/${test.info().project.name}-${name}.png`, fullPage: true, animations: "disabled" });
+async function pickFile(page: Page) {
+  await page.locator('input[type="file"]').setInputFiles({ name: FILE, mimeType: "video/mp4", buffer: Buffer.alloc(2048) });
 }
 
-const caption = (page: Page) => page.locator(".caption");
-
-test("empty", async ({ page }) => {
-  await setup(page, "hold");
-  await page.goto("/");
-  await expect(caption(page)).toHaveText("Drop a screen recording here");
-  await shot(page, "empty");
-});
-
-test("uploading", async ({ page }) => {
-  await setup(page, "hold");
-  await page.goto("/");
-  await pickFile(page);
-  await expect(caption(page)).toHaveText("Uploading 42%");
-  await shot(page, "uploading");
-});
-
-test("queued", async ({ page }) => {
-  await setup(page, "complete", job("pending"));
-  await page.goto("/");
-  await pickFile(page);
-  await expect(caption(page)).toHaveText("Waiting for a worker to start");
-  await shot(page, "queued");
-});
-
-test("processing", async ({ page }) => {
-  await setup(page, "complete", job("processing"));
-  await page.goto("/");
-  await pickFile(page);
-  await expect(caption(page)).toHaveText("Writing captions and voiceover");
-  await shot(page, "processing");
-});
-
-test("done", async ({ page }) => {
-  await setup(
-    page,
-    "complete",
-    job("done", {
-      preview_url: "https://mock-media.example/preview.webm",
-      download_url: "https://mock-media.example/download.mp4",
-    }),
-  );
-  await page.goto("/");
-  await pickFile(page);
-  await expect(caption(page)).toHaveText("Ready to watch");
-  const video = page.locator("video");
-  await expect(video).toBeVisible();
-  await video.evaluate(
+async function videoReady(page: Page) {
+  await page.locator(".screen video").evaluate(
     (v: HTMLVideoElement) =>
       new Promise<void>((resolve) => {
         if (v.readyState >= 2) return resolve();
         v.addEventListener("loadeddata", () => resolve(), { once: true });
       }),
   );
-  await expect(page.getByRole("link", { name: "Download video" })).toBeVisible();
-  await shot(page, "done");
+}
 
-  // Pressing play: playback starts, our caption, scrim and blur go, controls appear.
-  await page.getByRole("button", { name: "Play video" }).press("Enter");
-  await expect(caption(page)).toHaveCount(0);
-  await expect(video).toHaveAttribute("controls", "");
-  expect(await video.evaluate((v: HTMLVideoElement) => v.paused)).toBe(false);
-  await expect(page.locator(".screen__scrim")).toHaveCount(0);
+/** Pause at `t` and wait until that frame is painted, so the screenshot shows it. */
+async function seekAndPaint(page: Page, t: number) {
+  await page.locator(".screen video").evaluate(
+    (v: HTMLVideoElement, t: number) =>
+      new Promise<void>((resolve) => {
+        v.pause();
+        v.requestVideoFrameCallback(() => resolve());
+        v.currentTime = t;
+      }),
+    t,
+  );
+}
+
+/** Quality floor for every state, then a full-page screenshot. */
+async function shot(page: Page, name: string) {
+  await page.evaluate(() => document.fonts.ready);
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+  expect(overflow, `${name}: page is ${overflow}px wider than the viewport`).toBeLessThanOrEqual(0);
+  // Touch targets: every visible button and button-styled link is at least 44 px tall.
+  const small = await page
+    .locator("button:visible, a.button:visible, .topbar a:visible")
+    .evaluateAll((els) =>
+      els
+        .map((el) => ({ text: (el.textContent || el.getAttribute("aria-label") || "").trim(), h: el.getBoundingClientRect().height }))
+        .filter((t) => t.h < 44),
+    );
+  expect(small, `${name}: controls under 44 px`).toEqual([]);
+  await page.screenshot({ path: `screenshots/${test.info().project.name}-${name}.png`, fullPage: true, animations: "disabled" });
+}
+
+/**
+ * A viewport-sized image for the README (full-page phone shots are ~5000 px
+ * tall). Written next to the other screenshots; copied to docs/ by hand.
+ */
+async function docsShot(page: Page, project: string, file: string, size: { width: number; height: number }) {
+  if (test.info().project.name !== project) return;
+  await page.setViewportSize(size);
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.screenshot({ path: `screenshots/docs-${file}`, animations: "disabled" });
+}
+
+const stageTitle = (page: Page) => page.locator(".screen__title");
+const chips = (page: Page) => page.locator(".videos__row .chip").allInnerTexts();
+
+test("first visit", async ({ page }) => {
+  await setup(page, { seeded: [] });
+  await page.goto("/");
+  await expect(page.locator(".dropzone")).toHaveAttribute("data-large", "true");
+  await expect(page.getByRole("heading", { name: "How it works" })).toBeVisible();
+  await expect(page.locator(".how__steps li")).toHaveCount(4);
+  await expect(page.locator(".videos__empty")).toBeVisible();
+  await shot(page, "first-visit");
 });
 
-test("clicking the finished video doesn't open the file picker", async ({ page }) => {
-  await setup(page, "complete", job("done", { preview_url: "https://mock-media.example/p.webm", download_url: "https://mock-media.example/d.mp4" }));
+test("uploading", async ({ page }) => {
+  await setup(page, { upload: "hold" });
   await page.goto("/");
   await pickFile(page);
-  await expect(caption(page)).toHaveText("Ready to watch");
-  const chooser = page.waitForEvent("filechooser", { timeout: 1000 }).then(() => true, () => false);
-  await page.locator(".screen").click();
-  expect(await chooser).toBe(false);
+  await expect(stageTitle(page)).toHaveText("Uploading 42%");
+  await expect(page.locator(".steps li").first()).toHaveAttribute("data-state", "active");
+  await expect(page.getByRole("button", { name: "Choose a file" })).toBeDisabled();
+  await shot(page, "uploading");
+});
+
+test("queued", async ({ page }) => {
+  await setup(page, { jobJson: job("pending") });
+  await page.goto("/");
+  await pickFile(page);
+  await expect(stageTitle(page)).toHaveText("Waiting for a worker");
+  expect((await chips(page))[0]).toBe("Queued");
+  await expect(page).toHaveURL(new RegExp(`\\?job=${JOB_ID}$`));
+  await shot(page, "queued");
+});
+
+test("queued over 30 s explains the worker start", async ({ page }) => {
+  // Opened from a link: queued since its last update, 45 s ago.
+  await setup(page, { jobJson: job("pending", { updated_at: Math.floor(NOW / 1000) - 45 }) });
+  await page.goto(`/?job=${JOB_ID}`);
+  await expect(stageTitle(page)).toHaveText("Starting a worker");
+  await expect(page.locator(".screen__detail")).toContainText("about 3 minutes");
+  await expect(page.locator(".stage__title")).toHaveText(FILE); // name from the API, not this device
+  await shot(page, "queued-slow");
+});
+
+test("processing", async ({ page }) => {
+  await setup(page, { jobJson: job("processing") });
+  await page.goto("/");
+  await pickFile(page);
+  await expect(stageTitle(page)).toHaveText("Transcribing, captioning and voicing");
+  const states = await page.locator(".steps li").evaluateAll((els) => els.map((el) => el.getAttribute("data-state")));
+  expect(states).toEqual(["done", "done", "active", "todo"]);
+  expect((await chips(page))[0]).toBe("Processing");
+  await shot(page, "processing");
+  await docsShot(page, "1280", "ui-processing.png", { width: 1280, height: 1100 });
+});
+
+test("ready", async ({ page }) => {
+  await setup(page, { jobJson: DONE });
+  await page.goto("/");
+  await pickFile(page);
+  await expect(page.getByRole("link", { name: "Download video" })).toBeVisible();
+  await videoReady(page);
+  await expect(page.locator(".stage__meta")).toHaveText("0:29 · Ready in 3 min 10 s");
+  await expect(page.locator(".track__block")).toHaveCount(SEGMENTS.length);
+  await expect(page.locator(".did__tiles li")).toHaveText([
+    /Transcribed\s*7 caption segments/,
+    /Captioned\s*Burned into the video/,
+    /Voiced\s*Kajal, Amazon Polly/,
+    /Rendered\s*MP4, 0:29/,
+  ]);
+  expect((await chips(page))[0]).toBe("Ready");
+  await shot(page, "ready");
+  await docsShot(page, "380", "ui-mobile.png", { width: 380, height: 800 });
+});
+
+test("ready, playing: the caption track follows playback", async ({ page }) => {
+  await setup(page, { jobJson: DONE });
+  await page.goto(`/?job=${JOB_ID}`);
+  await videoReady(page);
+  await page.getByRole("button", { name: "Play video" }).click();
+  const video = page.locator(".screen video");
+  await expect(video).toHaveAttribute("controls", "");
+  // Pause inside the fourth caption, then after the last one (28-29 s has no caption).
+  await seekAndPaint(page, 14);
+  await expect(page.locator('.track__block[data-active="true"]')).toHaveText(SEGMENTS[3].text);
+  await shot(page, "ready-playing");
+  await docsShot(page, "1280", "ui.png", { width: 1280, height: 1100 });
+  await video.evaluate((v: HTMLVideoElement) => (v.currentTime = 28.5));
+  await expect(page.locator('.track__block[data-active="true"]')).toHaveCount(0);
+});
+
+test("toggle switches to the original and keeps the position", async ({ page }) => {
+  await setup(page, { jobJson: DONE });
+  await page.goto(`/?job=${JOB_ID}`);
+  await videoReady(page);
+  const reelops = page.getByRole("button", { name: "ReelOps version" });
+  const original = page.getByRole("button", { name: "Original" });
+  await expect(reelops).toHaveAttribute("aria-pressed", "true");
+  await page.getByRole("button", { name: "Play video" }).click();
+  const video = page.locator(".screen video");
+  await video.evaluate((v: HTMLVideoElement) => {
+    v.pause();
+    v.currentTime = 5;
+  });
+  await original.click();
+  await expect(original).toHaveAttribute("aria-pressed", "true");
+  await expect(reelops).toHaveAttribute("aria-pressed", "false");
+  await expect(video).toHaveAttribute("src", /original\.webm/);
+  await expect.poll(() => video.evaluate((v: HTMLVideoElement) => Math.round(v.currentTime))).toBe(5);
 });
 
 test("failed", async ({ page }) => {
-  await setup(
-    page,
-    "complete",
-    job("failed", {
-      error: "product-tour-final.mp4 has no audio stream. ReelOps needs a narrated recording to transcribe.",
-    }),
-  );
+  await setup(page, {
+    jobJson: job("failed", { error: `${FILE} has no audio stream. ReelOps needs a narrated recording to transcribe.` }),
+  });
   await page.goto("/");
   await pickFile(page);
-  await expect(caption(page)).toContainText("This recording has no sound");
+  await expect(page.getByRole("alert")).toContainText("This recording has no sound");
+  await expect(page.getByRole("alert")).toContainText("microphone on");
+  const states = await page.locator(".steps li").evaluateAll((els) => els.map((el) => el.getAttribute("data-state")));
+  expect(states).toEqual(["done", "done", "failed", "todo"]);
+  expect((await chips(page))[0]).toBe("Failed");
   await shot(page, "failed");
 });
 
-test("keyboard: tab order, visible focus ring, reopen a recent job", async ({ page }) => {
-  await setup(page, "hold");
-  await page.route("**/jobs/a1", (route) =>
-    route.fulfill({ json: { ...job("failed", { error: "no speech detected in input.mp4" }), job_id: "a1" } }),
+test("a rejected file explains how to fix it", async ({ page }) => {
+  await setup(page);
+  await page.goto("/");
+  await page.locator('input[type="file"]').setInputFiles({ name: "notes.pdf", mimeType: "application/pdf", buffer: Buffer.alloc(10) });
+  await expect(page.locator(".upload .alert")).toHaveText("That file is a .pdf. Choose an MP4, MOV or WebM recording.");
+});
+
+test("copy job link puts the ?job= URL on the clipboard", async ({ page, context, browserName }) => {
+  test.skip(browserName !== "chromium");
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await setup(page, { jobJson: DONE });
+  await page.goto(`/?job=${JOB_ID}`);
+  await page.getByRole("button", { name: "Copy job link" }).click();
+  await expect(page.getByRole("button", { name: "Link copied" })).toBeVisible();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(`http://127.0.0.1:4173/?job=${JOB_ID}`);
+});
+
+test("keyboard: skip link, visible focus ring, reopen a video", async ({ page }) => {
+  await setup(page);
+  await page.route("**/jobs/a2", (route) =>
+    route.fulfill({ json: { ...job("failed", { error: "no speech detected in input.mp4" }), job_id: "a2", filename: null } }),
   );
   await page.goto("/");
+  await expect(page.getByRole("heading", { level: 1 })).toBeVisible(); // rendered before the first Tab
 
   await page.keyboard.press("Tab");
-  const choose = page.getByRole("button", { name: "Choose a recording" });
+  await expect(page.getByRole("link", { name: "Skip to content" })).toBeFocused();
+  for (let i = 0; i < 4; i++) await page.keyboard.press("Tab"); // brand, 2 links, Choose a file
+  const choose = page.getByRole("button", { name: "Choose a file" });
   await expect(choose).toBeFocused();
-  const ring = await choose.evaluate((el) => getComputedStyle(el).outlineStyle + " " + getComputedStyle(el).outlineColor);
-  expect(ring).toBe("solid rgb(242, 214, 75)"); // 2 px yellow focus ring
+  const ring = await choose.evaluate((el) => `${getComputedStyle(el).outlineStyle} ${getComputedStyle(el).outlineColor}`);
+  expect(ring).toBe("solid rgb(16, 19, 24)"); // 2 px ink ring
 
   await page.keyboard.press("Tab");
-  const firstRow = page.locator(".recent__row").first();
-  await expect(firstRow).toBeFocused();
+  await expect(page.locator(".videos__row").first()).toBeFocused();
   await page.keyboard.press("Enter");
-  await expect(caption(page)).toContainText("No speech was found");
+  await expect(page.getByRole("alert")).toContainText("No speech was found");
+  await expect(page.locator(".videos__row").first()).toHaveAttribute("aria-current", "true");
+  await expect(page.locator(".stage__title")).toHaveText("onboarding-tour.mov"); // no API name: the local one
 });
