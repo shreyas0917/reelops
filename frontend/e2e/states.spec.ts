@@ -346,3 +346,46 @@ test("keyboard: skip link, visible focus ring, reopen a video", async ({ page })
   await expect(page.locator(".videos__row").first()).toHaveAttribute("aria-current", "true");
   await expect(page.locator(".stage__title")).toHaveText("onboarding-tour.mov"); // no API name: the local one
 });
+
+// ---- API outages (drill 5: replacing the only API task gave ~20 s of 503s) ----
+
+test("opening a job during an API outage waits instead of failing", async ({ page }) => {
+  await setup(page);
+  let calls = 0;
+  await page.route(`**/jobs/${JOB_ID}`, (route) =>
+    ++calls <= 3 ? route.fulfill({ status: 503, body: "Service Unavailable" }) : route.fulfill({ json: DONE }),
+  );
+  await page.goto(`/?job=${JOB_ID}`);
+  await expect(stageTitle(page)).toHaveText("Loading this video");
+  await expect(page.getByRole("link", { name: "Download video" })).toBeVisible({ timeout: 15_000 });
+  expect(calls).toBeGreaterThan(3);
+  await expect(page.locator(".failure")).toHaveCount(0);
+  await expect(page.locator(".notice")).toHaveCount(0); // a short outage stays quiet
+});
+
+test("a long outage shows a non-fatal notice and keeps polling", async ({ page }) => {
+  await page.clock.install();
+  await setup(page);
+  let down = true;
+  await page.route(`**/jobs/${JOB_ID}`, (route) =>
+    down ? route.fulfill({ status: 503, body: "Service Unavailable" }) : route.fulfill({ json: job("processing") }),
+  );
+  await page.goto(`/?job=${JOB_ID}`);
+  for (let i = 0; i < 16; i++) {
+    await page.clock.runFor(2_000); // one poll interval
+    await page.waitForTimeout(30); // let that poll's request settle
+  }
+  await expect(page.locator(".notice")).toHaveText("Having trouble reaching ReelOps. Still trying…");
+  await expect(page.locator(".failure")).toHaveCount(0);
+  down = false;
+  await page.clock.runFor(2_000);
+  await expect(stageTitle(page)).toHaveText("Transcribing, captioning and voicing");
+  await expect(page.locator(".notice")).toHaveCount(0);
+});
+
+test("a job that no longer exists still says so", async ({ page }) => {
+  await setup(page);
+  await page.route(`**/jobs/${JOB_ID}`, (route) => route.fulfill({ status: 404, json: { detail: "job not found" } }));
+  await page.goto(`/?job=${JOB_ID}`);
+  await expect(page.getByRole("alert")).toContainText("That job no longer exists");
+});
