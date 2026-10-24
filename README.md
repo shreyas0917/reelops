@@ -24,16 +24,9 @@ caption track that lights the caption on screen, with a toggle to compare it
 with the original. `?job=<id>` links reopen a job on any device. Uploads go
 straight to S3 with a presigned URL; the API only handles small JSON.
 
-<p>
-  <img src="docs/ui.png" width="40%" alt="Desktop: a finished video playing, the current caption lit in the caption track below it">
-  <img src="docs/ui-mobile.png" width="16%" alt="Phone: the same finished video with a play button and full-width buttons">
-  <img src="docs/ui-processing.png" width="40%" alt="Desktop: a job processing, with the four-step progress row">
-</p>
+![ReelOps first-visit screen: the upload card and the four-step "How it works" panel](docs/ui.png)
 
-Screenshots come from Playwright against a mocked API (`frontend/e2e/`). The
-video is real ReelOps output: a scripted walkthrough of an invented billing app,
-narrated with Polly and run through the worker pipeline
-(`scripts/make_ui_fixture.sh`).
+*First visit at 1280 px: drop a narrated recording, and the four steps explain what happens next.*
 
 ## Autoscaling
 
