@@ -517,6 +517,13 @@ main:focus,
   color: #fff;
 }
 
+/* A light video (most screen recordings) would melt into the white card. An
+   outline paints above the video, unlike a border or an inset shadow. */
+.screen:has(video) {
+  outline: 1px solid var(--hairline);
+  outline-offset: -1px;
+}
+
 .screen video {
   display: block;
   width: 100%;
