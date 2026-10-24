@@ -11,6 +11,11 @@ def test_defaults():
     assert s.polly_fallback_voice == "Joanna"
     assert s.max_speedup == 1.5
     assert s.aws_region == "ap-south-1"
+    assert s.whisper_hotwords is None  # no transcription hint unless configured
+
+
+def test_whisper_hotwords_from_env():
+    assert Settings.from_env({"REELOPS_WHISPER_HOTWORDS": " ReelOps "}).whisper_hotwords == "ReelOps"
 
 
 def test_env_overrides():
