@@ -52,9 +52,14 @@ def probe(media: Path, *, untrusted: bool = False) -> dict:
         cmd += ["-format_whitelist", UPLOAD_FORMATS]
     proc = _exec([*cmd, str(media)])
     if proc.returncode != 0:
-        if untrusted and "not on whitelist" in proc.stderr:
+        if untrusted:
+            # Any probe failure on an upload is the user's file: a format we
+            # don't accept ("not on whitelist"), not media at all, or a
+            # truncated/corrupt video. ffprobe's stderr (temp paths, memory
+            # addresses) is for operators, never the job's error.
+            log.warning("ffprobe rejected upload %s (exit %d): %s", media.name, proc.returncode, proc.stderr.strip())
             raise PipelineError(
-                f"{media.name} isn't an MP4, MOV or WebM video. Export it as MP4 and upload it again."
+                f"{media.name} isn't an MP4, MOV or WebM video we can read. Export it as MP4 and upload it again."
             )
         raise _fail(f"ffprobe ({media.name})", proc)
     return json.loads(proc.stdout)
