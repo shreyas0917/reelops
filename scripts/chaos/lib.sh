@@ -101,8 +101,11 @@ for e in json.load(sys.stdin)["events"]:
 # claimed the job (from its "claimed by" event; listing streams by name only
 # searches the first page).
 job_stream() {
+  # JSON + python, not --query: the CLI applies --query to each page of its
+  # auto-pagination, so an empty last page prints an extra "None".
   aws logs filter-log-events --log-group-name "$WORKER_LOGS" --start-time "$2" \
-    --filter-pattern "\"$1\" \"claimed by\"" --query 'events[-1].logStreamName' --output text
+    --filter-pattern "\"$1\" \"claimed by\"" --output json |
+    python3 -I -c 'import json,sys; e=json.load(sys.stdin)["events"]; print(e[-1]["logStreamName"] if e else "")'
 }
 
 # output_count <id>: how many objects exist for this job's output.
