@@ -36,9 +36,12 @@ env:
   TF_IN_AUTOMATION: "true"
   TF_INPUT: "false"
   # Owner-controlled settings: CI must never fall back to defaults (a default
-  # enable_compute=true would resume a paused stack).
+  # enable_compute=true would resume a paused stack). This repo is public and
+  # GitHub prints job-level env in every step header, so anything identifying
+  # (IPs, email, role ARNs with the account ID) must be a SECRET: only secrets
+  # are masked from the first log line. ENABLE_COMPUTE reveals nothing.
   TF_VAR_enable_compute: ${{ vars.ENABLE_COMPUTE }}
-  TF_VAR_allowed_cidrs: ${{ vars.ALLOWED_CIDRS }}
+  TF_VAR_allowed_cidrs: ${{ secrets.ALLOWED_CIDRS }}
   TF_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
 
 jobs:
@@ -59,12 +62,18 @@ jobs:
         with:
           fetch-depth: 0 # image_tags.sh needs full history
           persist-credentials: false
+      - &mask_owner
+        name: mask allowlisted IPs
+        # GitHub masks a secret only as a whole string; Terraform prints each
+        # IP on its own (security-group rules), so mask them one by one before
+        # anything else runs. Values come from the env, never the script text.
+        run: python3 -c 'import json,os; [print("::add-mask::" + c.split("/")[0]) for c in json.loads(os.environ.get("TF_VAR_allowed_cidrs") or "[]")]'
       - &check_settings
         name: check owner settings
         run: |
           missing=()
           [ -n "$TF_VAR_enable_compute" ] || missing+=("variable ENABLE_COMPUTE")
-          [ -n "$TF_VAR_allowed_cidrs" ] || missing+=("variable ALLOWED_CIDRS")
+          [ -n "$TF_VAR_allowed_cidrs" ] || missing+=("secret ALLOWED_CIDRS")
           [ -n "$TF_VAR_alert_email" ] || missing+=("secret ALERT_EMAIL")
           if [ ${#missing[@]} -gt 0 ]; then echo "::error::Not set: ${missing[*]}"; exit 1; fi
           case "$TF_VAR_enable_compute" in true | false) ;; *) echo "::error::ENABLE_COMPUTE must be true or false"; exit 1 ;; esac
@@ -75,18 +84,17 @@ jobs:
         run: scripts/image_tags.sh | tee -a "$GITHUB_OUTPUT"
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
-          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_PLAN_ROLE_ARN }}
           role-session-name: gha-plan-${{ github.run_id }}
+          mask-aws-account-id: true
           aws-region: ap-south-1
       - &mask_account
-        name: mask account ID and allowlisted IPs, locate state bucket
+        name: mask account ID, locate state bucket
         run: |
-          # Public repo: logs must not show these. Secrets (ALERT_EMAIL) are
-          # masked by GitHub; the account ID and IPs are not secrets, so mask
-          # them explicitly.
+          # Already masked via the role ARN secret and mask-aws-account-id;
+          # masked again here because later output (ARNs, ECR URLs) contains it.
           ACCT=$(aws sts get-caller-identity --query Account --output text)
           echo "::add-mask::$ACCT"
-          python3 -c 'import json,os; [print("::add-mask::" + c.split("/")[0]) for c in json.loads(os.environ["TF_VAR_allowed_cidrs"])]'
           { echo "ACCT=$ACCT"; echo "TF_STATE_BUCKET=reelops-tfstate-$ACCT"; } >> "$GITHUB_ENV"
       - &setup_terraform
         uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
@@ -159,12 +167,14 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - *mask_owner
       - *check_settings
       - *image_tags
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
-          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_PLAN_ROLE_ARN }}
           role-session-name: gha-plan-main-${{ github.run_id }}
+          mask-aws-account-id: true
           aws-region: ap-south-1
       - *mask_account
       - *setup_terraform
@@ -225,10 +235,12 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - *mask_owner
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
-          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           role-session-name: gha-deploy-${{ github.run_id }}
+          mask-aws-account-id: true
           aws-region: ap-south-1
       - *mask_account
       - *setup_terraform
