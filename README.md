@@ -18,11 +18,20 @@ through GitHub OIDC (no stored AWS keys).
 
 ## Web UI
 
-The page is a screen: drop a recording on it, and the caption at the bottom
-carries the status until the finished video plays in the same frame. Uploads
-go straight to S3 with a presigned URL; the API only handles small JSON.
+Upload a narrated recording and follow it through four steps (Uploaded,
+Waiting for a worker, Processing, Ready). The finished video plays above a
+caption track that lights the caption on screen, with a toggle to compare it
+with the original. `?job=<id>` links reopen a job on any device. Uploads go
+straight to S3 with a presigned URL; the API only handles small JSON.
 
-![ReelOps web UI with a finished video ready to play](docs/ui.png)
+<p>
+  <img src="docs/ui.png" width="40%" alt="Desktop: a finished video playing, the current caption lit in the caption track below it">
+  <img src="docs/ui-mobile.png" width="16%" alt="Phone: the same finished video with a play button and full-width buttons">
+  <img src="docs/ui-processing.png" width="40%" alt="Desktop: a job processing, with the four-step progress row">
+</p>
+
+Screenshots come from Playwright against a mocked API (`frontend/e2e/`); the
+video is ReelOps' own output for the synthetic test-pattern sample.
 
 ## Autoscaling
 
