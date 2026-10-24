@@ -3177,3 +3177,35 @@ record.
 2. *Why did the same-length video take twice as long?* Rendering cost depends
    on frame content and resolution, not just duration; a looped flat UI
    compresses and encodes far faster than a real screen recording.
+
+### Task 6 — A deploy guide checked against the repo
+
+**What we built:** A beginner-friendly "Deploy it yourself" section: tool
+checks, keyless AWS sign-in, nine steps each with a "you should see" line,
+pause and teardown, troubleshooting, and CI/CD in a fork.
+
+**Why this way:** Every command, file, resource address, output and script
+named in it was checked against the repo before committing; a guide that
+fails on step 7 costs a reader more than no guide.
+
+**Problems (corrected before committing):**
+- `scripts/e2e.sh` needs `.env` from `scripts/env_from_tf.sh` even against
+  the ALB, an input video, and `API_URL=...`; the draft ran it bare.
+- `scripts/make_sample.sh` needs ffmpeg/ffprobe, which weren't in the
+  prerequisites; `curl` (IP check, e2e) wasn't either.
+- `push_images.sh` refuses uncommitted changes in the image folders and
+  image tags need a full clone; both are now stated.
+- Unsourced durations (30-40 min overall, 10-15 min first build, 5-10 min
+  apply) were replaced with recorded facts (481 MB worker image, up to 3 min
+  scan wait per image) or plain wording.
+- `output api_url` is null while paused, not empty; the fork steps now name
+  the exact secrets, variable, environment and how to find the numeric IDs.
+
+**Interview questions:**
+1. *How do you keep setup docs from rotting?* Name only things that exist
+   (scripts, outputs, resource addresses), verify each against the code when
+   it changes, and give the reader a checkable "you should see" per step.
+2. *Why `-target` for the first apply here?* Task definitions reference
+   images that must already be in ECR; creating only the repositories first,
+   pushing, then applying everything is a one-time bootstrap ordering, not a
+   routine workflow.

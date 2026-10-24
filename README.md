@@ -109,51 +109,173 @@ terraform -chdir=terraform/main apply                             # resume
 
 ## Deploy it yourself
 
-**Prerequisites:** an AWS account, AWS CLI v2 with credentials (an SSO profile
-or instance role; no access keys needed), Terraform 1.10 or newer, Docker,
-git, bash and python3. Everything runs in `ap-south-1`.
+This builds the whole ReelOps stack in your own AWS account. You don't need
+to know Terraform: copy each step and check the "you should see" line before
+moving on.
 
+> **Cost:** about $0.05/hour while running and idle, about $0.16/hour while
+> processing, and about $0.10/month when paused (step 8). Pause or destroy it
+> when you're done.
+
+### What you need
+
+| Tool | Why | Check it's installed |
+| --- | --- | --- |
+| An AWS account | Where everything runs | You can sign in to the AWS console |
+| AWS CLI v2 | Lets your terminal talk to AWS | `aws --version` |
+| Terraform 1.10+ | Builds the infrastructure from code | `terraform version` |
+| Docker 23+ (with BuildKit) | Builds the API and worker images | `docker ps` (no error) |
+| git, bash, python3, curl | Scripts | `git --version` |
+| ffmpeg (optional) | Only for the test video and test script in step 7 | `ffmpeg -version` |
+
+**Sign the CLI in to AWS without access keys.** Use one of these:
+- **IAM Identity Center (SSO):** `aws configure sso`, then `aws sso login`
+- **An EC2 instance with an IAM role** (what this project used)
+
+Check it works:
 ```bash
-# 1. Bootstrap: the S3 bucket for Terraform state (local state, once)
+aws sts get-caller-identity
+```
+**You should see** your account number and user or role name. If you get an
+error, fix this first; nothing else will work.
+
+Everything is created in **`ap-south-1` (Mumbai)**.
+
+### Step 1: Get the code
+```bash
+git clone https://github.com/shreyas0917/reelops.git
+cd reelops
+```
+Use a normal (full) clone: image tags come from the git history, so a
+`--depth 1` clone won't work.
+
+### Step 2: Create the Terraform state bucket (once)
+Terraform remembers what it built in a "state" file. This step creates a
+private S3 bucket to keep that file safe.
+```bash
 terraform -chdir=terraform/bootstrap init
 terraform -chdir=terraform/bootstrap apply
+```
+Terraform shows what it will create and asks `Enter a value:`. Type **yes**.
+**You should see:** `Apply complete! Resources: 7 added`
 
-# 2. Configure (terraform.tfvars is git-ignored)
+### Step 3: Add your settings
+```bash
 cp terraform/main/terraform.tfvars.example terraform/main/terraform.tfvars
 ```
-
+Open `terraform/main/terraform.tfvars` and fill in:
 ```hcl
-# terraform/main/terraform.tfvars: placeholders, use your own values
-alert_email   = "<your-email>"        # alarm emails; confirm the subscription AWS sends
-allowed_cidrs = ["<your-ip>/32"]      # who may reach the ALB on port 80
+alert_email   = "you@example.com"     # where alarm emails go
+allowed_cidrs = ["203.0.113.10/32"]   # your public IP, with /32 on the end
 ```
+- **Your public IP:** run `curl -s https://checkip.amazonaws.com`.
+- **Why the IP:** the app has no login, so only your IP can open it.
+- `terraform.tfvars` is git-ignored, so your values never get committed.
 
+### Step 4: Connect Terraform to the state bucket
 ```bash
-# 3. Init against the state bucket (its name contains your account ID)
 terraform -chdir=terraform/main init \
   -backend-config="bucket=reelops-tfstate-$(aws sts get-caller-identity --query Account --output text)"
+```
+Only the bucket is needed here; the state file's key and region are already
+in `terraform/main/backend.tf`.
+**You should see:** `Terraform has been successfully initialized!`
 
-# 4. Image repositories first, then build and push both images
+### Step 5: Create the image repositories, then build and push the images
+The app runs as two Docker images (API and worker). They need somewhere to
+live (ECR) before AWS can run them.
+```bash
 terraform -chdir=terraform/main apply -target='aws_ecr_repository.this'
 scripts/push_images.sh
+```
+Type **yes** when asked; Terraform warns that `-target` is for exceptional
+cases, which this is.
+- `push_images.sh` logs in to ECR itself, builds both images for
+  `linux/amd64` (Fargate's platform; on an ARM laptop the build is emulated
+  and slower), pushes them, then waits up to 3 minutes per image for ECR's
+  vulnerability scan.
+- The worker image is about 480 MB because it includes the Whisper speech
+  model.
+- It refuses to run if `app/`, `frontend/` or `worker/` have uncommitted
+  changes, so every tag matches the code inside the image.
 
-# 5. Everything else (image tags are computed from the commit)
+**You should see:** `images ready: api=<7 characters> worker=<7 characters>`,
+then a vulnerability count for each new image.
+
+### Step 6: Build everything else
+```bash
 terraform -chdir=terraform/main apply
+```
+Read the plan, then type **yes**. This creates about 70 resources and waits
+until the load balancer and services are healthy.
+**You should see:** `Apply complete! Resources: ... added`
+
+**Then check your email.** AWS sends *"AWS Notification - Subscription
+Confirmation"*. Click **Confirm subscription**, or you won't get alarm
+emails.
+
+### Step 7: Open the app and make your first video
+```bash
 terraform -chdir=terraform/main output api_url
+```
+Open that URL in your browser and upload a short screen recording where you
+speak while recording.
 
-# Pause / resume
-terraform -chdir=terraform/main apply -var enable_compute=false
-terraform -chdir=terraform/main apply
+- **The first job waits about 3 minutes**, because workers start from zero to
+  save money. After that, a 2-minute recording takes about 33 seconds to
+  process.
+- **No recording handy?** Make a 30-second test video, then run a full
+  upload-to-download test from the terminal:
+  ```bash
+  scripts/make_sample.sh        # writes samples/synthetic.mp4 (needs ffmpeg)
+  scripts/env_from_tf.sh        # writes .env from Terraform's outputs (e2e.sh reads it)
+  API_URL="$(terraform -chdir=terraform/main output -raw api_url)" scripts/e2e.sh
+  ```
 
-# Tear down: empty the media bucket first (destroy keeps non-empty buckets);
-# the state bucket itself is kept (prevent_destroy)
+### Step 8: Pause when you're done (keeps your data)
+```bash
+terraform -chdir=terraform/main apply -var enable_compute=false   # pause
+terraform -chdir=terraform/main apply                             # resume later
+```
+Pausing removes the load balancer and running services and keeps your videos,
+images and settings, so the cost drops to about $0.10/month. While paused
+there is no app URL; resuming creates a new load balancer with a new one.
+
+### Step 9: Delete everything
+```bash
 aws s3 rm "s3://$(terraform -chdir=terraform/main output -raw media_bucket_name)" --recursive
 terraform -chdir=terraform/main destroy
 ```
+- The first command empties the video bucket, because AWS won't delete a
+  bucket that still has files in it.
+- The state bucket from step 2 is protected and kept. Delete it in the S3
+  console if you're completely finished.
 
-To run the CI/CD pipeline in a fork, set the `github_repo`, `github_owner_id`
-and `github_repo_id` variables in `terraform.tfvars`, then add the role ARNs
-and settings as repository secrets and variables (learning notes, Phase 7).
+### If something goes wrong
+
+| Problem | Fix |
+| --- | --- |
+| The app URL doesn't load (timeout) | Your IP changed. Update `allowed_cidrs` in `terraform.tfvars` and run `terraform -chdir=terraform/main apply` again. |
+| `ExpiredToken` or "Unable to locate credentials" | Sign in again: `aws sso login` |
+| Docker "permission denied" | Run `sudo usermod -aG docker $USER`, then log out and back in. |
+| `push_images.sh` says there are uncommitted changes | Commit or stash your changes in `app/`, `frontend/` or `worker/`. |
+| The job sits on "Queued" | Normal for about 3 minutes while the first worker starts. |
+| No alarm emails | Confirm the subscription email from step 6 (check spam). |
+| `Error acquiring the state lock` | Another Terraform command is still running. Wait for it to finish. |
+
+### Optional: CI/CD in your fork
+To run the GitHub Actions pipeline in your own fork:
+1. Set `github_repo` (`owner/name`), `github_owner_id` and `github_repo_id` in
+   `terraform.tfvars`. The two IDs are numbers:
+   `gh api repos/<owner>/<repo> --jq '.owner.id, .id'`.
+2. Run `terraform -chdir=terraform/main apply` again. It updates the two CI
+   roles; `output gha_plan_role_arn` and `output gha_deploy_role_arn` print
+   their ARNs.
+3. In GitHub, add the repository secrets `AWS_PLAN_ROLE_ARN`, `ALLOWED_CIDRS`
+   and `ALERT_EMAIL`, the variable `ENABLE_COMPUTE` (`true` or `false`), and a
+   `production` environment with yourself as required reviewer and the
+   secret `AWS_DEPLOY_ROLE_ARN`.
+   [Learning notes, Phase 7](docs/learning-notes.md) has the details.
 
 ## Repo layout
 
