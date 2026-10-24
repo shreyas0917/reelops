@@ -1,3 +1,4 @@
+import logging
 import shutil
 
 import pytest
@@ -53,3 +54,30 @@ def test_upload_input_uses_the_whitelist(tmp_path):
     args = ffmpeg.upload_input(tmp_path / "a.mp4")
     assert args[:2] == ["-format_whitelist", ffmpeg.UPLOAD_FORMATS]
     assert "dash" not in ffmpeg.UPLOAD_FORMATS.split(",")
+
+
+@pytest.mark.parametrize("kind", ["text named .mp4", "truncated mp4"])
+def test_unreadable_upload_gets_a_friendly_error_without_internals(tmp_path, caplog, kind):
+    upload = tmp_path / "input.mp4"
+    if kind == "text named .mp4":
+        upload.write_text("This is a text file pretending to be a video.\n" * 200)
+    else:
+        # No faststart: the moov index is at the end, so the cut removes it.
+        real = _make_video(tmp_path / "real.mp4", with_audio=True)
+        upload.write_bytes(real.read_bytes()[: real.stat().st_size // 3])
+    with caplog.at_level(logging.WARNING), pytest.raises(PipelineError) as err:
+        ffmpeg.has_stream(upload, "video", untrusted=True)
+    assert str(err.value) == (
+        "input.mp4 isn't an MP4, MOV or WebM video we can read. Export it as MP4 and upload it again."
+    )
+    # ffprobe's details (temp path, demuxer, memory address) stay in the logs.
+    assert "ffprobe rejected upload input.mp4" in caplog.text
+    assert "moov atom not found" in caplog.text or "Invalid data" in caplog.text
+
+
+def test_trusted_probe_failure_keeps_the_details(tmp_path):
+    # Our own intermediate files: a failure there is a bug, so keep stderr.
+    broken = tmp_path / "voice.wav"
+    broken.write_text("not audio")
+    with pytest.raises(PipelineError, match=r"ffprobe \(voice.wav\) failed"):
+        ffmpeg.probe(broken)
