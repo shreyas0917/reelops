@@ -12,12 +12,13 @@ deletes exactly those afterwards. Account IDs are shown as `<account-id>`.
 | --- | --- | --- |
 | 0. Pre-flight: who consumes the live queue? | Finding: a dev-box worker did | n/a (stopped) |
 | 1. Worker stopped mid-job (SIGTERM) | PASS | re-claimed 54 s, done 167 s after the stop |
-| 1b. Worker crashes mid-job (SIGKILL) | PASS, with a finding | re-claimed 300 s after the claim, done 389 s after the kill |
+| 1b. Worker crashes mid-job (SIGKILL) | PASS; finding fixed (give-up now counts attempts, not receives) | re-claimed 300 s after the claim, done 388 s after the kill |
 | 2. Duplicate delivery of a finished job's event | PASS | skipped < 1 s after delivery; nothing to recover |
-| 3. Poison input (text named .mp4; video without audio) | FAIL: bug found (unclear error for unreadable files) | failed on the 1st attempt, < 1 s; not retried |
-| 4. Unprocessable message -> DLQ -> alarm | PASS (both emails received) | DLQ after 3 receives (18.5 min); ALARM 190 s later; OK 173 s after the purge |
-| 5. API task stopped | PASS (single task: 20 s outage); finding: UI shows a transient 503 as a failed job | 503 for 20 s; 200 again 33 s after the stop |
-| 6. Scale-in protection (run 1: manual scale-in) | INCONCLUSIVE; finding: step scaling reverts manual desired-count changes | n/a: rerun planned with autoscaling-driven scale-in |
+| 3. Poison input (text named .mp4; video without audio) | FAIL -> **PASS after the fix** (clear error for unreadable files) | failed on the 1st attempt, < 1 s; not retried |
+| 4. Unprocessable message -> DLQ -> alarm | PASS before and after the fix (both runs' ALARM and OK emails received) | before: DLQ after 3 receives (18.5 min); after: 10 receives (54.6 min); ALARM ~3 min later; OK ~3 min after the purge |
+| 5. API task stopped | PASS (single task: 20 s outage); UI finding (transient 503 shown as a failed job) fixed in PR #9 | 503 for 20 s; 200 again 33 s after the stop |
+| 6. Scale-in protection (run 1: manual scale-in) | INCONCLUSIVE; finding: step scaling reverts manual desired-count changes | n/a |
+| 6. Scale-in protection (run 2: autoscaling scale-in) | PASS (observed; drill script re-run pending) | idle task stopped 6 s after the scale-in decision; protected job finished, attempts=1 |
 
 Relevant settings: SQS visibility timeout 300 s, `maxReceiveCount` 3 (then
 the DLQ), job lease 240 s, heartbeat every 60 s, worker shutdown grace 20 s,
@@ -424,3 +425,153 @@ now comes from the job's own "claimed" log event.
 
 **Next:** rerun with autoscaling performing the scale-in (backlog drops from
 3 to 1 while a ~40-minute job is mid-processing), after the fix deploy.
+
+## After the fixes (PR #9, deployed 2026-10-24 15:04 UTC)
+
+PR #9 (`fix/attempts-not-receives`) changed: the worker gives a job up after
+3 real attempts (claims counted on the job item) and fails a job whose
+attempts all died mid-job before claiming it again; SQS `maxReceiveCount`
+3 -> 10 as a backstop; any ffprobe failure on an upload gives a clear message
+(raw stderr only in a WARNING log); the web UI keeps polling through API
+outages. Verified live: `api=18c6c5e`, `worker=0ec6fb3`, `maxReceiveCount=10`,
+and `terraform plan` on main: "No changes".
+
+### 1b after: worker crash (SIGKILL)
+
+Drill worker on the deployed image `0ec6fb3`; same 8-minute input.
+
+```
+15:25:04 drill worker reelops-drill-worker started (hostname d2e153824208)
+15:25:14 claimed by the drill worker after 7s: attempts=1
+15:25:36 drill worker SIGKILLed 25s after the claim
+15:30:13 re-claimed 300s after the first claim: attempts=2
+15:32:06 done 388s after the kill: status=done attempts=2
+ECS worker log:
+15:30:05 01e9b2b3 job 5b35daa4-...: claimed by ip-10-20-1-224...-7-e26939 (attempt 2, receive 3)
+15:32:02 01e9b2b3 job 5b35daa4-...: done -> s3://reelops-media-<account-id>/output/5b35daa4-....mp4
+PASS test1b-worker-crash: ... taken over by ECS 300s after the claim ...,
+done 388s after the kill; attempts=2, 1 output, no local worker left
+```
+
+| | Before | After |
+| --- | --- | --- |
+| Recovery (claim -> take-over -> done) | 300 s / 389 s after the kill | 300 s / 388 s after the kill |
+| Take-over log | `(receive 3)` | `(attempt 2, receive 3)` |
+| A transient error on this attempt would... | fail the job: receive 3 >= 3, "gave up after 3 attempts", message to the DLQ | retry it: attempt 2 < 3 |
+
+The same situation occurred again (receive 3 on attempt 2), and the worker
+now decides by the job's attempts.
+
+**Open question:** SQS again counted two receives in the minute of the
+first delivery (1 message sent), this time while ECS ran **no** workers, so
+only the drill worker was consuming. The explanation given for the first run
+(a scaling-in ECS worker released the message) is therefore unproven: the
+release isn't logged, and this run had no such worker. The drill now keeps the
+drill worker's full log, whose claim line ("attempt 1, receive N") will show
+whether the extra receive happens before its claim. With the fix the extra
+receive is harmless.
+
+### 3 after: poison input
+
+```
+15:33:05 submitted eb15f517-... (text) and dbffecff-... (no audio)
+15:33:05 01e9b2b3 job eb15f517-...: claimed by ...-7-e26939 (attempt 1, receive 1)
+15:33:05 01e9b2b3 job eb15f517-...: failed: input.mp4 isn't an MP4, MOV or WebM video
+         we can read. Export it as MP4 and upload it again.
+15:33:06 01e9b2b3 job dbffecff-...: claimed by ...-7-e26939 (attempt 1, receive 1)
+15:33:06 01e9b2b3 job dbffecff-...: failed: input.mp4 has no audio stream. ReelOps
+         needs a narrated recording to transcribe; record with your microphone on.
+operators' WARNING log:
+15:33:05 reelops_worker.ffmpeg: ffprobe rejected upload input.mp4 (exit 1):
+         [mov,mp4,m4a,3gp,3g2,mj2 @ 0x55ad8ef95fc0] moov atom not found
+DLQ before=0 after=0; queue empty
+PASS test3-poison-input: both poison inputs failed once with a clear error
+within 7s; attempts=1, messages deleted, nothing in the DLQ, no output
+```
+
+| | Before | After |
+| --- | --- | --- |
+| Text file's job error | `ffprobe (input.mp4) failed (exit 1): [mov,mp4,... @ 0x563ed0112fc0] moov atom not found /tmp/job-u4m74srg/input.mp4: Invalid data...` | `input.mp4 isn't an MP4, MOV or WebM video we can read. Export it as MP4 and upload it again.` |
+| Where ffprobe's details go | the job record (public API, web UI) | the worker's WARNING log only |
+| Attempts / DLQ | 1 / none | 1 / none |
+
+### 4 after: DLQ and alerting (maxReceiveCount 10)
+
+```
+15:57:04 queue: maxReceiveCount=10, visibility timeout 300s
+15:57:05 sent malformed message (marker chaos-drill-bd7fc6db-...)
+worker log (one line per receive):
+16:01:23 ... 16:46:23  10 x "ValueError: not an S3 event message: KeyError('Records')", 300 s apart
+16:51:40 message in the DLQ 3276s after sending
+16:54:40 alarm ALARM 180s after the move (email sent via SNS)
+16:54:43 DLQ message is the drill's (receive count 11, incl. this check)
+16:54:49 DLQ purged
+16:57:44 alarm OK 175s after the purge
+alarm history:
+2026-10-24T16:54:38 Alarm updated from OK to ALARM   (22:24:38 IST)
+2026-10-24T16:57:38 Alarm updated from ALARM to OK   (22:27:38 IST)
+PASS test4-dlq-alarm: 10 receives, in the DLQ 3276s after sending, alarm ALARM
+180s later; purged, alarm OK 175s after the purge
+```
+
+Both SNS emails arrived (confirmed by the recipient): ALARM at 22:24 IST and
+OK at 22:27 IST, matching the alarm history.
+
+| | Before (maxReceiveCount 3) | After (maxReceiveCount 10) |
+| --- | --- | --- |
+| Receives before the DLQ | 3, 300 s apart | 10, 300 s apart |
+| Sent -> DLQ | 1107 s (18.5 min) | 3276 s (54.6 min) |
+| DLQ -> ALARM | 190 s | 180 s |
+| Purge -> OK | 173 s | 175 s |
+
+The trade-off of the fix: a message no worker can handle now reaches a human
+~36 minutes later. In exchange, a real job is no longer pushed towards the
+DLQ by harmless receives (1b), and jobs that exhaust their 3 real attempts
+fail at once (the user sees "failed") instead of waiting for redrive. Jobs
+that give up no longer reach the DLQ at all; an alarm on the worker's
+"giving up" log lines is planned (Phase 9).
+
+## 6. Scale-in protection, run 2 (autoscaling scale-in)
+
+**How it was run:** The redesigned `scripts/chaos/test6_scale_in_protection.sh`
+submits a 40-minute job (45 MB) and two 31 s jobs; autoscaling runs two
+workers; when the short jobs finish, the backlog drops to 1 and autoscaling
+itself scales in to one task while the long job is processing. The script hit
+a harness bug while identifying the busy task (its log-stream lookup printed
+an extra `None` page under CLI pagination; fixed), so the rest of this run was
+recorded by observing the service directly. A clean script re-run is planned
+for the Phase 9 session.
+
+**Expected:** ECS stops the idle task (protection off) and keeps the busy one
+(protection on), which finishes its job (attempts=1, one output) and turns
+protection off; autoscaling then scales in to 0 by itself.
+
+**Actual:** As expected.
+
+```
+15:34:09 submitted long 9c25d3a8-... (2483 s) and short e1b0f587-..., 251db9d6-...
+15:37:21 2 workers running 193s after submitting
+15:37:54 task 01e9b2b3: protection=True   (holds the long job)
+         task 36a8231b: protection=False  (idle; short jobs done)
+scaling activities:
+15:36:43 Setting desired count to 2.
+15:40:43 Setting desired count to 1.
+15:56:51 Setting desired count to 0.
+service events:
+15:40:49 has stopped 1 running tasks: (task 36a8231b...)
+watch: 15:40:50 desired=1 running=[01e9b2b3] long=processing
+busy task 01e9b2b3 log:
+15:34:09 consumer: job 9c25d3a8-...: claimed by ...-7-e26939 (attempt 1, receive 1)
+15:34:09 protection: task protection on
+15:44:36 consumer: job 9c25d3a8-...: done -> s3://reelops-media-<account-id>/output/9c25d3a8-....mp4
+15:44:36 protection: task protection off
+15:44:42 long job done: status=done attempts=1 outputs=1
+15:44:58 busy task 01e9b2b3 protection after the job: False
+15:56:55 workers at 0 (autoscaling, never suspended)
+```
+
+**What it proves:** When autoscaling scales in, ECS chooses the idle worker
+and never the one holding a job (6 s from the scale-in decision to the idle
+task stopping); the protected job finished on its first attempt, and its
+worker dropped protection as soon as it was done. Autoscaling kept control
+throughout and scaled to zero 12 minutes after the last job.

@@ -49,6 +49,16 @@ starts, mostly CloudWatch metric delay rather than Fargate start-up. For bursty
 demo traffic that's a good trade; if first-job latency mattered, we'd keep one
 warm worker during working hours or trigger scale-out directly from the API.
 
+## Reliability
+
+Failure drills against the live stack (`scripts/chaos/`, results in
+[docs/failure-tests.md](docs/failure-tests.md)): a worker stopped or killed
+mid-job, duplicate S3 events, unreadable uploads, an unprocessable message
+(DLQ and email alarm), the API task replaced, and scale-in with task
+protection. Jobs were never lost or duplicated; the drills found and fixed
+three bugs (retry budget spent by harmless SQS receives, raw ffprobe errors
+shown to users, an API blip shown as a failed job in the UI).
+
 ## Layout
 
 | Path | Purpose |

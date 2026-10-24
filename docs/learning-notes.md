@@ -2952,3 +2952,37 @@ alarm on "gave up" log lines would restore operator visibility.
 2. *How should a polling UI handle errors?* Separate "the resource is gone"
    (stop, explain) from "I couldn't reach the server" (keep the last state,
    retry, and only surface a non-blocking notice after a sustained outage).
+
+### Re-runs after the fixes (1b, 3, 4, 6)
+
+**What we built:** After PR #9 was deployed (plan on main: "No changes"),
+drill 1b's take-over logged `(attempt 2, receive 3)`: the same receive count
+that would have failed the job before is now harmless. Drill 3's text file got
+the clear error, with ffprobe's details only in the WARNING log. Drill 4
+needed 10 receives (54.6 min) before the DLQ instead of 3 (18.5 min); both
+emails arrived. Drill 6, redesigned, showed autoscaling's scale-in stopping
+the idle worker 6 s after its decision while the protected one finished a
+40-minute job.
+
+**Why this way:** Re-running the same drills gives a before/after on the same
+evidence (log lines, receive counts, alarm history), not a claim.
+
+**Problems:**
+- Drill 1b first ran the old worker image: its tag came from `image_tags.sh`
+  on a branch without the fix commits. It now reads the live task definition.
+- A Terraform plan run from the drills branch proposed reverting
+  `maxReceiveCount` to 3: plan from the branch that is deployed (main).
+- `--query` on an auto-paginated AWS CLI call is applied per page (an extra
+  `None`); the third time this bit, so log lookups now parse JSON in Python.
+- The extra SQS receive at first delivery happened again with no ECS worker
+  running, so the run-1 explanation is unproven; the drill now keeps the drill
+  worker's full log to settle it.
+
+**Interview questions:**
+1. *How do you prove a reliability fix works?* Reproduce the failure first
+   with a scripted drill that asserts the outcome, deploy the fix, re-run the
+   same drill, and compare the same evidence before and after.
+2. *What's the trade-off of a higher SQS maxReceiveCount?* Poison messages
+   take longer to reach the DLQ (here ~55 instead of ~18 minutes) and its
+   alarm; in exchange, transient redeliveries don't push real work there. Keep
+   the real retry limit in the application and alert on give-ups separately.
