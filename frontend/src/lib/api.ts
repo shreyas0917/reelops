@@ -39,7 +39,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       throw new UserFacingError(
         detail
           ? `${detail.charAt(0).toUpperCase()}${detail.slice(1)}.`
-          : "That file can't be uploaded. Choose an mp4, mov or webm recording up to 200 MB.",
+          : "That file can't be uploaded. Choose an MP4, MOV or WebM recording up to 200 MB.",
       );
     }
     if (response.status === 404) {

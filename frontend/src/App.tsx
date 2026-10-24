@@ -176,7 +176,7 @@ export function App() {
             <button type="button" className="button button--primary" onClick={() => input.current?.click()}>
               Choose a recording
             </button>
-            <p className="actions__hint">mp4, mov or webm, up to 200 MB, with narration.</p>
+            <p className="actions__hint">MP4, MOV or WebM, up to 200 MB, with narration.</p>
           </>
         )}
         {phase === "uploading" && <p className="actions__hint">Keep this page open until the upload finishes.</p>}
