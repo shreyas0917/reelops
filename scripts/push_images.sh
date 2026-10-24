@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Build the api and worker images, tag each with the git short SHA of the last
-# commit that touched its folder, push to ECR (login via the instance role),
-# and write the tags to terraform/main/images.auto.tfvars (git-ignored).
+# commit that changed what goes into it (scripts/image_tags.sh), and push them
+# to ECR (login via the instance role). Terraform computes the same tags
+# itself (data.external.image_tags), so nothing needs writing for it.
 #
 # Needs: ECR repos from terraform/main, docker, aws CLI, a clean app/, frontend/ and worker/.
 # Usage: scripts/push_images.sh
@@ -9,7 +10,6 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 REGION="${AWS_REGION:-ap-south-1}"
-TFVARS="terraform/main/images.auto.tfvars"
 
 # Build context and Dockerfile per image. Tags come from scripts/image_tags.sh,
 # the one place that decides them (also used by CI).
@@ -54,8 +54,7 @@ for name in api worker; do
   pushed+=("$name")
 done
 
-scripts/image_tags.sh --tfvars >"$TFVARS"
-echo "wrote $TFVARS: api=${TAGS[api]} worker=${TAGS[worker]}"
+echo "images ready: api=${TAGS[api]} worker=${TAGS[worker]}"
 
 # Informational: CVE counts from ECR's basic scan of each newly pushed image.
 # Poll by hand: right after a push the scan doesn't exist yet, and

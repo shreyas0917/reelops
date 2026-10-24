@@ -48,6 +48,10 @@ jobs:
             docker run --rm -i -v "$PWD/.hadolint.yaml:/.config/hadolint.yaml:ro" "$HADOLINT_IMAGE" hadolint - < "$f"
             echo "::endgroup::"
           done
+      # Only paths that go into an image may change its tag (and so trigger a
+      # rebuild and a deploy). Builds its own repo, so a shallow checkout is fine.
+      - name: image tag rules
+        run: scripts/test_image_tags.sh
 
   terraform:
     name: terraform
