@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The single place that decides image tags (used by push_images.sh, local
 # Terraform via images.auto.tfvars, and CI):
-#   api    = last commit touching app/ or frontend/  (the API image serves the UI)
+#   api    = last commit touching app/ or frontend/, except test-only paths
+#            (the API image serves the UI)
 #   worker = last commit touching worker/
 # Tags are always the first 7 hex characters of that commit, so every clone
 # computes the same string (git's %h grows when a prefix is ambiguous).
@@ -21,7 +22,19 @@ if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
 fi
 
 tag_for() { git log -1 --format=%H -- "$@" | cut -c1-7; }
-API=$(tag_for app frontend)
+# Paths that never reach the shipped API image (app/Dockerfile.dockerignore and
+# the runtime stage): a commit touching only these must not force a new tag,
+# a rebuild and a deploy. An exclude list on purpose: a new build input is
+# counted by default (worst case an extra rebuild, never a stale image).
+# *.test.ts files gate the build (npm test) but are never bundled into dist/.
+API_TEST_ONLY=(
+  ":(exclude)app/tests"
+  ":(exclude)app/requirements-dev.txt"
+  ":(exclude)frontend/e2e"
+  ":(exclude)frontend/playwright.config.ts"
+  ":(exclude,glob)frontend/src/**/*.test.ts"
+)
+API=$(tag_for app frontend "${API_TEST_ONLY[@]}")
 WORKER=$(tag_for worker)
 [ -n "$API" ] && [ -n "$WORKER" ] || { echo "image_tags.sh: no commits found for app/frontend or worker" >&2; exit 1; }
 
