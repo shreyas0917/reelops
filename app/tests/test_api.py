@@ -1,7 +1,10 @@
 import time
+from decimal import Decimal
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+
+from reelops_api.jobs import MAX_FILENAME_CHARS, display_filename
 
 VALID = {"filename": "demo.mp4", "content_type": "video/mp4", "size": 5_000_000}
 
@@ -56,12 +59,47 @@ def test_mov_and_webm_are_allowed(client):
         assert r.json()["upload_url"].split("?")[0].endswith(f"/input.{filename.rsplit('.', 1)[1].lower()}")
 
 
+def test_filename_is_stored_sanitized_and_returned(client, table):
+    payload = {**VALID, "filename": "C:\\Users\\me\\Q3  demo\u202e4pm.mp4"}
+    job_id = client.post("/jobs", json=payload).json()["job_id"]
+    assert table.get_item(Key={"job_id": job_id})["Item"]["filename"] == "Q3 demo4pm.mp4"
+    assert client.get(f"/jobs/{job_id}").json()["filename"] == "Q3 demo4pm.mp4"
+
+
+@pytest.mark.parametrize(
+    ("raw", "shown"),
+    [
+        ("demo.mp4", "demo.mp4"),
+        ("folder/sub/demo.mov", "demo.mov"),  # browsers send a bare name, but don't trust it
+        ("line\nbreak\t.webm", "line break .webm"),
+        ("cafe\u0301.mp4", "caf\u00e9.mp4"),  # NFC: one code point for é
+        ("zero\u200bwidth.mp4", "zerowidth.mp4"),
+    ],
+)
+def test_display_filename(raw, shown):
+    assert display_filename(raw) == shown
+
+
+def test_long_filename_is_cut_keeping_the_extension():
+    shown = display_filename("a" * 300 + ".webm")
+    assert len(shown) == MAX_FILENAME_CHARS
+    assert shown.endswith("….webm")
+
+
+def test_job_without_stored_filename_returns_null(client, table):
+    job_id = client.post("/jobs", json=VALID).json()["job_id"]
+    table.update_item(Key={"job_id": job_id}, UpdateExpression="REMOVE filename")  # as created before this change
+    assert client.get(f"/jobs/{job_id}").json()["filename"] is None
+
+
 def test_get_pending_job_has_no_download_url(client):
     job_id = client.post("/jobs", json=VALID).json()["job_id"]
     body = client.get(f"/jobs/{job_id}").json()
     assert body["status"] == "pending"
     assert body["download_url"] is None
     assert body["preview_url"] is None
+    assert body["original_preview_url"] is None
+    assert (body["segments"], body["voice"]) == ([], None)
     assert body["error"] is None
 
 
@@ -81,6 +119,32 @@ def test_get_done_job_has_presigned_attachment_download(client, table):
         assert url.path == f"/output/{job_id}.mp4"
         assert query["X-Amz-Expires"] == ["900"]
         assert query["response-content-disposition"] == [f'{disposition}; filename="reelops-{job_id}.mp4"']
+
+
+def test_done_job_returns_segments_voice_and_original_preview(client, table):
+    job_id = client.post("/jobs", json=VALID).json()["job_id"]
+    # As the worker stores them: DynamoDB numbers come back as Decimal.
+    segments = [
+        {"start": Decimal("0.5"), "end": Decimal("2.25"), "text": "Welcome to ReelOps."},
+        {"start": Decimal("2.25"), "end": Decimal("4.123"), "text": "Upload a recording."},
+    ]
+    table.update_item(
+        Key={"job_id": job_id},
+        # "segments" is a DynamoDB reserved word, so it needs a placeholder too.
+        UpdateExpression="SET #s = :done, #segs = :segs, voice = :voice",
+        ExpressionAttributeNames={"#s": "status", "#segs": "segments"},
+        ExpressionAttributeValues={":done": "done", ":segs": segments, ":voice": "Kajal"},
+    )
+    body = client.get(f"/jobs/{job_id}").json()
+    assert body["segments"] == [
+        {"start": 0.5, "end": 2.25, "text": "Welcome to ReelOps."},
+        {"start": 2.25, "end": 4.123, "text": "Upload a recording."},
+    ]
+    assert body["voice"] == "Kajal"
+    # The raw upload, signed for inline playback (the UI's "Original" toggle).
+    url = urlparse(body["original_preview_url"])
+    assert url.path == f"/raw/{job_id}/input.mp4"
+    assert parse_qs(url.query)["response-content-disposition"] == [f'inline; filename="original-{job_id}.mp4"']
 
 
 def test_failed_job_reports_error(client, table):

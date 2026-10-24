@@ -32,15 +32,25 @@ class CreateJobResponse(BaseModel):
     expires_in: int
 
 
+class Segment(BaseModel):
+    start: float = Field(description="seconds from the start of the video")
+    end: float
+    text: str
+
+
 class JobResponse(BaseModel):
     job_id: str
     status: str
+    filename: str | None = Field(description="the uploaded file's name, sanitized; null for older jobs")
     error: str | None
     attempts: int
     created_at: int
     updated_at: int
     download_url: str | None
     preview_url: str | None
+    original_preview_url: str | None = Field(description="the raw upload, playable inline; once done")
+    segments: list[Segment] = Field(description="burned-in captions in order; empty until done")
+    voice: str | None = Field(description="Polly voice used; once done")
 
 
 def create_app(settings: Settings | None = None, *, s3=None, table=None) -> FastAPI:
