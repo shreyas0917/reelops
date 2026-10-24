@@ -262,9 +262,18 @@ class Consumer:
             self._delete(receipt)
             return "too_large"
 
-        if not self._claim(job_id, obj.etag):
+        # A job whose earlier attempts all died mid-job (crash, OOM) never
+        # reached the "give up" below: stop it here instead of crash-looping.
+        attempts = int(job.get("attempts", 0))
+        if attempts >= self.settings.max_attempts and self._give_up_unclaimed(job_id, attempts):
+            log.warning("job %s: gave up after %d attempts that never finished", job_id, attempts)
+            self._delete(receipt)
+            return "gave_up"
+
+        attempt = self._claim(job_id, obj.etag)
+        if attempt is None:
             return self._claim_failed(job_id, receipt)
-        return self._process(job_id, obj, receipt, receives)
+        return self._process(job_id, obj, receipt, receives, attempt)
 
     def _claim_failed(self, job_id: str, receipt: str) -> str:
         job = self._get_job(job_id) or {}
@@ -288,20 +297,20 @@ class Consumer:
         log.warning("job %s: claim failed with status=%s; leaving message for retry", job_id, status)
         return "retry"
 
-    def _process(self, job_id: str, obj: S3Object, receipt: str, receives: int) -> str:
-        log.info("job %s: claimed by %s (receive %d)", job_id, self.worker_id, receives)
+    def _process(self, job_id: str, obj: S3Object, receipt: str, receives: int, attempt: int) -> str:
+        log.info("job %s: claimed by %s (attempt %d, receive %d)", job_id, self.worker_id, attempt, receives)
         self._busy = True
         try:
             # Scale-in protection for the whole job, including the final
             # "done" write and the delete; cleared on every exit path.
             with self.protection.protected(job_id):
-                return self._run_job(job_id, obj, receipt, receives)
+                return self._run_job(job_id, obj, receipt, attempt)
         finally:
             self._busy = False
             if self._signals:
                 signal.alarm(0)
 
-    def _run_job(self, job_id: str, obj: S3Object, receipt: str, receives: int) -> str:
+    def _run_job(self, job_id: str, obj: S3Object, receipt: str, attempt: int) -> str:
         try:
             with Heartbeat(self, job_id, receipt) as heartbeat, tempfile.TemporaryDirectory(prefix="job-") as tmp:
                 src = Path(tmp) / Path(obj.key).name
@@ -344,13 +353,15 @@ class Consumer:
             return "abandoned"
 
         except Exception as exc:
-            # Possibly transient (network, throttling, a bug): leave the message
-            # so SQS retries; after max_receives it moves to the DLQ.
-            if receives >= self.settings.max_receives:
-                log.exception("job %s: failed on final attempt %d; message goes to the DLQ", job_id, receives)
-                self._set_status(job_id, "failed", error=f"gave up after {receives} attempts: {exc}")
+            # Possibly transient (network, throttling, a bug): retry until the
+            # job's own attempt count runs out, then fail it for good. The
+            # user sees "failed", so the message has nothing left to do.
+            if attempt >= self.settings.max_attempts:
+                log.exception("job %s: failed on final attempt %d; giving up", job_id, attempt)
+                if self._set_status(job_id, "failed", error=f"gave up after {attempt} attempts: {exc}"):
+                    self._delete(receipt)
             else:
-                log.exception("job %s: error on attempt %d; will retry", job_id, receives)
+                log.exception("job %s: error on attempt %d; will retry", job_id, attempt)
                 # Release the claim so the retry can take it straight away.
                 self._set_status(job_id, "pending", error=str(exc))
             return "retry"
@@ -364,11 +375,13 @@ class Consumer:
             return None
         return item
 
-    def _claim(self, job_id: str, etag: str) -> bool:
-        """Atomically take the job if it's pending or its lease has gone stale."""
+    def _claim(self, job_id: str, etag: str) -> int | None:
+        """Atomically take the job if it's pending or its lease has gone stale.
+        Returns the job's attempt number (this claim included), or None.
+        """
         now = int(self.clock())
         try:
-            self.table.update_item(
+            response = self.table.update_item(
                 Key={"job_id": job_id},
                 UpdateExpression=(
                     "SET #s = :processing, claimed_at = :now, updated_at = :now, worker_id = :me, etag = :etag "
@@ -385,11 +398,12 @@ class Consumer:
                     ":etag": etag,  # recorded as an identifier only
                     ":one": 1,
                 },
+                ReturnValues="UPDATED_NEW",
             )
-            return True
+            return int(response["Attributes"]["attempts"])
         except ClientError as exc:
             if _condition_failed(exc):
-                return False
+                return None
             raise
 
     def _set_status(self, job_id: str, status: str, error: str | None = None, fields: dict | None = None) -> bool:
@@ -414,6 +428,35 @@ class Consumer:
                 ConditionExpression="worker_id = :me AND #s = :processing",
                 ExpressionAttributeNames=names,
                 ExpressionAttributeValues=values,
+            )
+            return True
+        except ClientError as exc:
+            if _condition_failed(exc):
+                return False
+            raise
+
+    def _give_up_unclaimed(self, job_id: str, attempts: int) -> bool:
+        """Fail a claimable job (pending, or a stale lease) that has used up
+        its attempts. False if it isn't claimable (e.g. a live worker holds it).
+        """
+        now = int(self.clock())
+        try:
+            self.table.update_item(
+                Key={"job_id": job_id},
+                UpdateExpression="SET #s = :failed, #e = :error, updated_at = :now",
+                ConditionExpression=(
+                    "attempts >= :max AND (#s = :pending OR (#s = :processing AND claimed_at < :stale))"
+                ),
+                ExpressionAttributeNames={"#s": "status", "#e": "error"},
+                ExpressionAttributeValues={
+                    ":failed": "failed",
+                    ":pending": "pending",
+                    ":processing": "processing",
+                    ":max": self.settings.max_attempts,
+                    ":stale": now - self.settings.lease_seconds,
+                    ":error": f"gave up after {attempts} attempts: the worker stopped during each one",
+                    ":now": now,
+                },
             )
             return True
         except ClientError as exc:

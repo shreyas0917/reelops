@@ -269,16 +269,58 @@ def test_unexpected_error_releases_claim_and_leaves_message(aws, worker, monkeyp
     assert queue_counts(aws) == (0, 1)  # still in flight: SQS will redeliver
 
 
-def test_final_attempt_marks_failed(aws, worker, monkeypatch):
-    monkeypatch.setattr(consumer, "run_pipeline", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+def boom(*args, **kwargs):
+    raise RuntimeError("boom")
+
+
+def test_third_real_attempt_gives_up_and_deletes(aws, worker, monkeypatch):
+    monkeypatch.setattr(consumer, "run_pipeline", boom)
+    job_id, key = make_job(aws, attempts=2)  # two earlier attempts failed
+    assert worker.handle(deliver(aws, s3_event(key))) == "retry"
+    item = job(aws, job_id)
+    assert (item["status"], item["attempts"]) == ("failed", 3)
+    assert item["error"] == "gave up after 3 attempts: boom"
+    assert queue_counts(aws) == (0, 0)  # the user sees "failed"; nothing left for the DLQ
+
+
+def test_receive_count_doesnt_spend_attempts(aws, worker, monkeypatch):
+    # Drill 1b: SQS counted two harmless receives (a scale-in release, a
+    # crashed worker) before this job's first real failure. It must retry.
+    monkeypatch.setattr(consumer, "run_pipeline", boom)
     job_id, key = make_job(aws)
     msg = deliver(aws, s3_event(key))
     msg["Attributes"]["ApproximateReceiveCount"] = "3"
     assert worker.handle(msg) == "retry"
     item = job(aws, job_id)
-    assert item["status"] == "failed"
-    assert "gave up after 3 attempts: boom" in item["error"]
-    assert queue_counts(aws) == (0, 1)  # left for the DLQ
+    assert (item["status"], item["attempts"], item["error"]) == ("pending", 1, "boom")
+    assert queue_counts(aws) == (0, 1)  # left for a retry
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"status": "pending"},  # e.g. handed back each time
+        {"status": "processing", "worker_id": "worker-dead", "claimed_at": NOW - 241},  # crashed holding it
+    ],
+)
+def test_crash_loop_is_given_up_before_claiming(aws, worker, fake_pipeline, fields):
+    # Three attempts each died mid-job (OOM, crash): no worker ever reached
+    # the give-up code, so the next receive must stop it, not claim it again.
+    job_id, key = make_job(aws, attempts=3, **fields)
+    assert worker.handle(deliver(aws, s3_event(key))) == "gave_up"
+    item = job(aws, job_id)
+    assert (item["status"], item["attempts"]) == ("failed", 3)
+    assert item["error"] == "gave up after 3 attempts: the worker stopped during each one"
+    assert fake_pipeline == []
+    assert queue_counts(aws) == (0, 0)
+
+
+def test_used_up_attempts_dont_override_a_live_lease(aws, worker, fake_pipeline):
+    # A live worker on its third attempt keeps the job; the duplicate is dropped.
+    job_id, key = make_job(aws, status="processing", attempts=3, worker_id="worker-other", claimed_at=NOW - 10)
+    assert worker.handle(deliver(aws, s3_event(key))) == "lease_held"
+    assert job(aws, job_id)["status"] == "processing"
+    assert fake_pipeline == []
 
 
 def test_lost_lease_does_not_mark_done_or_delete(aws, worker, monkeypatch):
