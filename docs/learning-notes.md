@@ -2366,3 +2366,68 @@ have caught it earlier.
    job until approved, deployment branch policies restrict which refs can
    deploy, and environment-scoped secrets/variables (and OIDC `sub` claims like
    `environment:production`) are only available to jobs in that environment.
+
+### Step 8 — Prove the pipeline end to end
+
+**What we built:** A real change (UI copy: "MP4, MOV or WebM") went through
+PR #1 → 6 CI checks + Terraform plan comment → rebase merge → `plan-main` →
+manual approval in the `production` environment → images pushed and
+`terraform apply`. ECS now runs api `30d4687` and worker `c30f716`, the SHAs
+of the last commits that touched each image's folders.
+
+**Why this way:** Testing the pipeline with a small, visible change proves
+every stage (build, scan, plan, approval, push, apply, rollout) at once, and
+the new UI text makes the verification obvious. Alternatives: a no-op commit
+(proves nothing reaches ECS), or `workflow_dispatch` only (skips the PR path).
+
+**Problems:**
+- *OIDC AccessDenied on the PR plan.* CloudTrail showed the token's `sub` was
+  `repo:shreyas0917@150114060/reelops@1430851219:pull_request`: the repo uses
+  GitHub's immutable subject format (owner and repo IDs included, so a
+  renamed or re-created repo can't inherit the trust). Fixed the trust policy
+  to build that prefix from variables.
+- *Public log leak.* The role ARN (account ID) and the allowlisted IPs were
+  printed in step headers. `::add-mask::` only masks output after it runs, and
+  GitHub masks secrets, not variables, so the ARNs and `ALLOWED_CIDRS` became
+  secrets, the action got `mask-aws-account-id`, each IP is masked in the first
+  step, and the leaking run's logs were deleted.
+- *Home IP changed* → the ALB stopped answering. Updated `allowed_cidrs`; the
+  plan showed only the SG rule replacement (1 add, 1 destroy); updated the
+  secret for both Actions and Dependabot.
+
+**Interview questions:**
+1. *How do you debug "Not authorized to perform sts:AssumeRoleWithWebIdentity"?*
+   Find the failed call in CloudTrail and compare the token's `sub`/`aud` with
+   the trust policy conditions; the mismatch is almost always the `sub`
+   (format, branch, environment, or immutable IDs).
+2. *Why can't `::add-mask::` hide a value that appears in job-level `env`?*
+   The step header that lists inputs and env is printed before any step runs,
+   so the mask doesn't exist yet. Only registered secrets are masked from the
+   start, so sensitive values must be secrets, not variables.
+
+### Step 9 — README badges; Dependabot plan failure
+
+**What we built:** CI and Terraform status badges in the README (pinned to
+`?branch=main`, so a red PR branch doesn't show as the project's status), and
+a diagnosis of why the Terraform plan fails on Dependabot PRs.
+
+**Why this way:** Badges are the quickest signal to a reviewer that the
+pipeline exists and is green. Without `?branch=main` a badge can show the
+latest run of any branch.
+
+**Problems:** Dependabot PR #2's plan failed with "Could not load credentials
+from any providers". Workflows triggered by Dependabot get **Dependabot
+secrets** only, and `AWS_PLAN_ROLE_ARN` is an Actions secret, so
+`role-to-assume` was empty and the action fell back to the (empty) default
+credential chain. Proposed fix: skip the PR plan job for Dependabot and fork
+PRs (CI checks still gate them; `plan-main` plans before deploy approval),
+rather than giving the bot AWS access. PR #2 is also a TypeScript major bump,
+which should be ignored in `dependabot.yml`, not merged.
+
+**Interview questions:**
+1. *What's different about workflows triggered by Dependabot?* They run with a
+   read-only `GITHUB_TOKEN` by default and only see Dependabot secrets, like a
+   fork PR, because the updated dependency code is untrusted until reviewed.
+2. *Should every PR get a cloud plan?* Only PRs from trusted authors: plans run
+   with real (read-only) credentials, and untrusted code (forks, dependency
+   bumps) shouldn't get them. The merge to main still plans before apply.
