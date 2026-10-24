@@ -2,7 +2,8 @@
 #
 # A workflow job with `permissions: id-token: write` gets a short-lived JWT
 # signed by GitHub. Its claims say who is asking (aud = sts.amazonaws.com,
-# sub = repo:<owner>/<repo>:<context>). The job exchanges it with
+# sub = repo:<owner>@<owner-id>/<repo>@<repo-id>:<context>; this repo uses
+# GitHub's immutable subject format). The job exchanges it with
 # sts:AssumeRoleWithWebIdentity; AWS verifies the signature and the trust
 # policy's aud/sub conditions and returns ~1-hour credentials for that role.
 #
@@ -20,8 +21,26 @@ variable "github_repo" {
   }
 }
 
+# GitHub's immutable subject format includes numeric IDs, which are never
+# reused: a deleted-and-recreated repo or a re-registered owner name can't
+# match these roles ("repo-jacking"). Public metadata, not secrets:
+#   gh api repos/<owner>/<repo> --jq '.owner.id, .id'
+variable "github_owner_id" {
+  description = "Numeric GitHub user/org ID of the repository owner."
+  type        = number
+  default     = 150114060
+}
+
+variable "github_repo_id" {
+  description = "Numeric GitHub repository ID."
+  type        = number
+  default     = 1430851219
+}
+
 locals {
-  gh_issuer      = "token.actions.githubusercontent.com"
+  gh_issuer = "token.actions.githubusercontent.com"
+  # e.g. repo:shreyas0917@150114060/reelops@1430851219
+  gh_sub_prefix  = "repo:${split("/", var.github_repo)[0]}@${var.github_owner_id}/${split("/", var.github_repo)[1]}@${var.github_repo_id}"
   tfstate_bucket = "reelops-tfstate-${local.account_id}" # created by terraform/bootstrap
 }
 
@@ -49,8 +68,8 @@ data "aws_iam_policy_document" "gha_plan_trust" {
       test     = "StringLike"
       variable = "${local.gh_issuer}:sub"
       values = [
-        "repo:${var.github_repo}:pull_request",
-        "repo:${var.github_repo}:ref:refs/heads/*",
+        "${local.gh_sub_prefix}:pull_request",
+        "${local.gh_sub_prefix}:ref:refs/heads/*",
       ]
     }
   }
@@ -108,7 +127,7 @@ data "aws_iam_policy_document" "gha_deploy_trust" {
     condition {
       test     = "StringEquals"
       variable = "${local.gh_issuer}:sub"
-      values   = ["repo:${var.github_repo}:environment:production"]
+      values   = ["${local.gh_sub_prefix}:environment:production"]
     }
   }
 }
