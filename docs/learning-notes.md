@@ -2667,3 +2667,25 @@ gained an optional `REELOPS_WHISPER_HOTWORDS` setting (default: none).
    The script is the documentation: anyone can rebuild the media (here from
    an invented app, so no personal data), changes are reviewable as code, and
    large binaries stay out of git.
+
+### Step 3c — One README image
+
+**What we built:** The README's Web UI section shows a single image, the
+first-visit screen at 1280 px, clipped by Playwright just below the upload and
+"How it works" cards (68 KB). The phone and processing images were removed.
+
+**Why this way:** One clear image of the entry point reads better in a README
+than three small ones. The crop height is measured from the page (bottom of
+the lower card + 16 px), not hard-coded, so a layout change can't cut a card
+off or let the next card creep in.
+
+**Problems:** None; the image was already small (70 KB), and a lossless
+re-compression saved only 2 %.
+
+**Interview questions:**
+1. *How do you take a stable partial screenshot?* Clip to coordinates computed
+   from the elements you want (`getBoundingClientRect` + scroll offset), with
+   animations disabled and fonts loaded, instead of fixed pixel values.
+2. *Lossless vs lossy image optimisation?* Lossless (zlib level, filters)
+   keeps every pixel; lossy (palette quantisation, JPEG/WebP) trades fidelity
+   for size. UI screenshots with flat colours are usually small enough losslessly.
