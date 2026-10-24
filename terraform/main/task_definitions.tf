@@ -1,6 +1,19 @@
-# Fargate task definitions. Images are referenced by immutable SHA tags
-# (images.auto.tfvars, written by scripts/push_images.sh); a new tag creates a
-# new revision. Both images already run as non-root uid 10001.
+# Fargate task definitions. Images are referenced by immutable SHA tags; a new
+# tag creates a new revision. Both images already run as non-root uid 10001.
+
+# Image tags for the checked-out commit, computed by the same script CI and
+# push_images.sh use, so a plain `terraform plan` always means "deploy this
+# commit". Before, tags came from a git-ignored images.auto.tfvars that only
+# push_images.sh wrote: once deploys moved to CI it went stale, and a local
+# plan wanted to roll both services back to old images.
+data "external" "image_tags" {
+  program = ["bash", "${path.module}/../../scripts/image_tags.sh", "--json"]
+}
+
+locals {
+  api_image_tag    = coalesce(var.api_image_tag, data.external.image_tags.result.api)
+  worker_image_tag = coalesce(var.worker_image_tag, data.external.image_tags.result.worker)
+}
 
 locals {
   # Same values scripts/env_from_tf.sh writes for docker compose.
@@ -36,7 +49,7 @@ resource "aws_ecs_task_definition" "api" {
 
   container_definitions = jsonencode([{
     name         = "api"
-    image        = "${aws_ecr_repository.this["api"].repository_url}:${var.api_image_tag}"
+    image        = "${aws_ecr_repository.this["api"].repository_url}:${local.api_image_tag}"
     essential    = true
     portMappings = [{ containerPort = 8000, protocol = "tcp" }]
     environment  = local.common_env
@@ -86,7 +99,7 @@ resource "aws_ecs_task_definition" "worker" {
     # and exits; the worker starts only after it succeeds.
     {
       name                   = "init-tmp"
-      image                  = "${aws_ecr_repository.this["worker"].repository_url}:${var.worker_image_tag}"
+      image                  = "${aws_ecr_repository.this["worker"].repository_url}:${local.worker_image_tag}"
       essential              = false
       user                   = "0"
       entryPoint             = ["chmod", "1777", "/tmp"]
@@ -100,7 +113,7 @@ resource "aws_ecs_task_definition" "worker" {
     },
     {
       name        = "worker"
-      image       = "${aws_ecr_repository.this["worker"].repository_url}:${var.worker_image_tag}"
+      image       = "${aws_ecr_repository.this["worker"].repository_url}:${local.worker_image_tag}"
       essential   = true
       command     = ["consume"]
       environment = concat(local.common_env, [{ name = "REELOPS_JOBS_QUEUE_URL", value = aws_sqs_queue.jobs.url }])

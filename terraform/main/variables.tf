@@ -35,21 +35,23 @@ variable "enable_compute" {
 }
 
 variable "api_image_tag" {
-  description = "Tag of the reelops-api image in ECR (git short SHA). Written to images.auto.tfvars by scripts/push_images.sh."
+  description = "Override for the reelops-api image tag. Unset (the default), the tag comes from scripts/image_tags.sh for the checked-out commit (data.external.image_tags)."
   type        = string
+  default     = null
 
   validation {
-    condition     = var.api_image_tag != "latest" && can(regex("^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$", var.api_image_tag))
+    condition     = var.api_image_tag == null || (var.api_image_tag != "latest" && can(regex("^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$", var.api_image_tag)))
     error_message = "api_image_tag must be a specific image tag (e.g. a git SHA), never \"latest\"."
   }
 }
 
 variable "worker_image_tag" {
-  description = "Tag of the reelops-worker image in ECR (git short SHA). Written to images.auto.tfvars by scripts/push_images.sh."
+  description = "Override for the reelops-worker image tag. Unset (the default), the tag comes from scripts/image_tags.sh for the checked-out commit (data.external.image_tags)."
   type        = string
+  default     = null
 
   validation {
-    condition     = var.worker_image_tag != "latest" && can(regex("^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$", var.worker_image_tag))
+    condition     = var.worker_image_tag == null || (var.worker_image_tag != "latest" && can(regex("^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$", var.worker_image_tag)))
     error_message = "worker_image_tag must be a specific image tag (e.g. a git SHA), never \"latest\"."
   }
 }

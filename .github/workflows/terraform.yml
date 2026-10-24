@@ -83,6 +83,8 @@ jobs:
           [ -n "$TF_VAR_alert_email" ] || missing+=("secret ALERT_EMAIL")
           if [ ${#missing[@]} -gt 0 ]; then echo "::error::Not set: ${missing[*]}"; exit 1; fi
           case "$TF_VAR_enable_compute" in true | false) ;; *) echo "::error::ENABLE_COMPUTE must be true or false"; exit 1 ;; esac
+      # For display (PR comment, logs) only: Terraform computes the same tags
+      # itself from the same checkout (data.external.image_tags).
       - &image_tags
         name: image tags
         id: tags
@@ -114,9 +116,9 @@ jobs:
         id: plan
         run: |
           set +e
-          terraform plan -lock-timeout=5m -no-color -detailed-exitcode \
-            -var "api_image_tag=${{ steps.tags.outputs.api }}" \
-            -var "worker_image_tag=${{ steps.tags.outputs.worker }}" > plan.txt 2>&1
+          # No -var image tags: Terraform computes them from this checkout
+          # (data.external.image_tags runs scripts/image_tags.sh).
+          terraform plan -lock-timeout=5m -no-color -detailed-exitcode > plan.txt 2>&1
           code=$?
           set -e
           cat plan.txt
@@ -189,9 +191,9 @@ jobs:
         id: plan
         run: |
           set +e
-          terraform plan -lock-timeout=5m -no-color -detailed-exitcode -out=tfplan \
-            -var "api_image_tag=${{ steps.tags.outputs.api }}" \
-            -var "worker_image_tag=${{ steps.tags.outputs.worker }}" > plan.txt 2>&1
+          # No -var image tags: computed from this checkout by the same script
+          # push_images.sh uses in the deploy job (same commit, same tags).
+          terraform plan -lock-timeout=5m -no-color -detailed-exitcode -out=tfplan > plan.txt 2>&1
           code=$?
           set -e
           cat plan.txt
