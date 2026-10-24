@@ -3087,3 +3087,57 @@ add-only on existing alarms.
 2. *Why treat missing data as not breaching here?* No log lines (worker
    scaled to zero) means nothing gave up; "missing" isn't a failure, and the
    default would flap to INSUFFICIENT_DATA.
+
+### Task 3 (test) — Give-up alarm end to end
+
+**What we built:** After the deploy, one give-up line written to a separate
+test stream in the worker log group (`aws logs put-log-events`) took the
+`reelops-dev-worker-gave-up` alarm to ALARM 46 s later and back to OK 6
+minutes after that (SNS notified on both transitions); the test stream was
+deleted. It is
+drill 7 in `docs/failure-tests.md`.
+
+**Why this way:** Injecting one log line tests the whole chain (metric filter
+-> metric -> alarm -> SNS -> email) in a minute, instead of making a real job
+fail three times. Waiting for the new alarm to settle to OK first kept the
+test's ALARM and OK emails separate from the alarm's initial OK email.
+
+**Problems:** None. The alarm stayed in ALARM for 6 minutes although the
+period is 60 s: CloudWatch keeps evaluating a sparse metric over a longer
+window while it waits for late data.
+
+**Interview questions:**
+1. *How do you test an alerting pipeline without causing the failure?* Inject
+   the signal at the cheapest point that still exercises every later step
+   (here a log line), in a clearly named test source, and check each hop:
+   metric value, alarm state history, notification received.
+2. *Why did an alarm with a 60 s period take 6 minutes to clear?* For sparse
+   or missing data, CloudWatch evaluates over a wider range than the
+   evaluation periods to allow for late data, so recovery is slower than
+   detection.
+
+### Task 4 — README for a two-minute read
+
+**What we built:** A rewritten README: pitch, architecture diagram, demo
+placeholder, what it does, a results table, how it works (lease, DLQ,
+scale-in protection), CI/CD and security, bugs found and fixed, trade-offs,
+cost, deploy steps and repo layout. Drill 7 (give-up alarm) was added to
+`docs/failure-tests.md`.
+
+**Why this way:** A recruiter scans, so every section is a table or a few
+lines, and every number links to where it was measured (failure tests, load
+test, build notes, `terraform state list`) instead of being restated without
+a source.
+
+**Problems:** The diagram was checked twice before committing: its PNG
+metadata (no text chunks, no 12-digit numbers, IPs or emails) and its visible
+content. Two task IPs from drill 5's target-health output were replaced with
+labels; the media bucket has no `force_destroy`, so the teardown steps empty
+it first.
+
+**Interview questions:**
+1. *What belongs in a project README?* What it does and why it's interesting
+   in the first screen, then evidence (measured results, how it's tested),
+   then how to run it; link deeper docs instead of repeating them.
+2. *How do you keep numbers in docs honest?* Cite where each one came from
+   (a log, a test, a command) and re-measure rather than round up.
