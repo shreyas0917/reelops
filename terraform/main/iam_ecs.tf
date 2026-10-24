@@ -69,6 +69,14 @@ data "aws_iam_policy_document" "api_task" {
     actions   = ["s3:GetObject"]
     resources = ["${aws_s3_bucket.media.arn}/output/*"]
   }
+
+  # The web UI's "Original" toggle plays the raw upload through a presigned
+  # inline GET. Read-only, and still only this bucket's raw/ prefix.
+  statement {
+    sid       = "SignOriginalPreviewUrls"
+    actions   = ["s3:GetObject"]
+    resources = ["${aws_s3_bucket.media.arn}/raw/*"]
+  }
 }
 
 resource "aws_iam_role" "api_task" {
