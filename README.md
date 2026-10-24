@@ -26,7 +26,8 @@ each job and plays the result above a caption track that follows playback.
 
 | Metric | Result | Source |
 | --- | --- | --- |
-| Processing speed | 2-minute recording in 16 s; 41-minute recording in 20 min | [failure tests](docs/failure-tests.md) 1 and 6 |
+| Processing time | A real 2-minute screen recording is processed in 33 s on a running worker (worker pipeline only; excludes upload and queue wait) | [learning notes](docs/learning-notes.md), "Processing time" |
+| Upload to ready | Within 13 s for a 31 s recording with a worker running; from idle, add ~200 s for the first worker to start | [failure tests](docs/failure-tests.md) 2; Phase 5 load test |
 | Autoscaling | 0 → 3 workers on an 8-job burst, back to 0 after 10 idle minutes | [learning notes](docs/learning-notes.md), Phase 5 load test |
 | Concurrency test | 8 jobs submitted to an idle stack: all done 233 s after the first upload (first worker started at 202 s) | same load test (`scripts/load_test.sh`) |
 | Idle cost | ~$0.05/hour with workers at 0; ~$0.10/month paused | [cost](#cost) below |
