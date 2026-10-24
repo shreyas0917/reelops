@@ -3209,3 +3209,30 @@ fails on step 7 costs a reader more than no guide.
    images that must already be in ECR; creating only the repositories first,
    pushing, then applying everything is a one-time bootstrap ordering, not a
    routine workflow.
+
+### Task 7 — Final checks from a clean clone; resume bullets
+
+**What we built:** A fresh clone of the public repo passed every CI-equivalent
+check (ruff, 84 worker and 26 API tests, the image-tag test, 37 frontend
+tests, `terraform fmt -check`, `validate` for both stacks) and gitleaks over
+102 commits. The account ID, ALB DNS name, email and three IPs appear in no
+file and no commit (with a positive control proving the search works). The
+README's links and images resolve and GitHub renders all 9 tables.
+`docs/resume.md` holds four bullets, each with a proof link.
+
+**Why this way:** Checking a clean clone, not the working copy, catches what
+only exists locally (untracked files, ignored config, cached builds). The
+sensitive values were read from local config and searched by label, so the
+report never prints them.
+
+**Problems:** None in the repo. Two checks needed a second look: zero hits
+must be proven with a positive control, and GitHub renders `<table
+role="table">`, so a count of `<table>` said 0.
+
+**Interview questions:**
+1. *How do you check a public repo for leaked identifiers, not just secrets?*
+   Search every blob in every commit (`git grep <value> $(git rev-list --all)`)
+   and the commit messages for each specific value, alongside a secret
+   scanner, and prove the search with a known-present string.
+2. *Why put proof links next to resume claims?* Each number then points to
+   where it was measured, so it survives an interviewer's follow-up.
