@@ -3087,3 +3087,93 @@ add-only on existing alarms.
 2. *Why treat missing data as not breaching here?* No log lines (worker
    scaled to zero) means nothing gave up; "missing" isn't a failure, and the
    default would flap to INSUFFICIENT_DATA.
+
+### Task 3 (test) — Give-up alarm end to end
+
+**What we built:** After the deploy, one give-up line written to a separate
+test stream in the worker log group (`aws logs put-log-events`) took the
+`reelops-dev-worker-gave-up` alarm to ALARM 46 s later and back to OK 6
+minutes after that; both emails arrived (ALARM 23:47, OK 23:53 IST); the
+test stream was deleted. It is
+drill 7 in `docs/failure-tests.md`.
+
+**Why this way:** Injecting one log line tests the whole chain (metric filter
+-> metric -> alarm -> SNS -> email) in a minute, instead of making a real job
+fail three times. Waiting for the new alarm to settle to OK first kept the
+test's ALARM and OK emails separate from the alarm's initial OK email.
+
+**Problems:** None. The alarm stayed in ALARM for 6 minutes although the
+period is 60 s: CloudWatch keeps evaluating a sparse metric over a longer
+window while it waits for late data.
+
+**Interview questions:**
+1. *How do you test an alerting pipeline without causing the failure?* Inject
+   the signal at the cheapest point that still exercises every later step
+   (here a log line), in a clearly named test source, and check each hop:
+   metric value, alarm state history, notification received.
+2. *Why did an alarm with a 60 s period take 6 minutes to clear?* For sparse
+   or missing data, CloudWatch evaluates over a wider range than the
+   evaluation periods to allow for late data, so recovery is slower than
+   detection.
+
+### Task 4 — README for a two-minute read
+
+**What we built:** A rewritten README: pitch, architecture diagram, demo
+placeholder, what it does, a results table, how it works (lease, DLQ,
+scale-in protection), CI/CD and security, bugs found and fixed, trade-offs,
+cost, deploy steps and repo layout. Drill 7 (give-up alarm) was added to
+`docs/failure-tests.md`.
+
+**Why this way:** A recruiter scans, so every section is a table or a few
+lines, and every number links to where it was measured (failure tests, load
+test, build notes, `terraform state list`) instead of being restated without
+a source.
+
+**Problems:** The diagram was checked twice before committing: its PNG
+metadata (no text chunks, no 12-digit numbers, IPs or emails) and its visible
+content. Two task IPs from drill 5's target-health output were replaced with
+labels; the media bucket has no `force_destroy`, so the teardown steps empty
+it first.
+
+**Interview questions:**
+1. *What belongs in a project README?* What it does and why it's interesting
+   in the first screen, then evidence (measured results, how it's tested),
+   then how to run it; link deeper docs instead of repeating them.
+2. *How do you keep numbers in docs honest?* Cite where each one came from
+   (a log, a test, a command) and re-measure rather than round up.
+
+### Task 5 — Processing time: what each number measures
+
+**What we built:** A record of every processing-time number, with what it
+measures, so the README and resume quote like with like. Sources: worker
+`pipeline: done: ... (<input>s) in <N>s` log lines (CloudWatch, 7-day
+retention, copied here), job items, and the drill logs.
+
+| Input | Measured | Time | Worker | Source |
+| --- | --- | --- | --- | --- |
+| Real 2-minute screen recording (121.5 s) | pipeline only (transcribe 7.8 s, voice 4.9 s, render 19.7 s) | 32.8 s | Fargate 2 vCPU, running | worker log 2026-10-23 17:39:32 UTC, job 4c3ac3ad |
+| Synthetic walkthrough looped (124.1 s) | pipeline only (transcribe 2.9 s, voice 6.0 s, render 7.2 s) | 16.3 s | Fargate 2 vCPU, running | drill 1, worker log 2026-10-24 12:45:28 UTC |
+| Same real recording (121 s) | pipeline only, dev box CLI | 27.6 s | n/a | Phase 1 Step 6 |
+| Synthetic 31 s recording | end to end: upload finished to `done` | within 13 s (drill polls every 5 s) | running | drill 2 |
+| Synthetic 41-minute walkthrough (2483 s) | claim to `done` (includes S3 download/upload) | 20 min | running | drill 6 clean re-run |
+| Any job, workers at 0 | wait for the first worker | +~200 s (201.7 s) | cold | Phase 5 load test |
+
+**Why this way:** "Pipeline only" (the worker's own `in <N>s`) excludes the S3
+download and upload, the queue wait and any cold start; "end to end" includes
+everything the user waits for. Content matters: rendering re-encodes every
+frame, so a real, busy screen recording renders ~2.7x slower than the flat,
+looped mock UI (19.7 s vs 7.2 s), and real narration gives Whisper more
+speech. The real recording is the honest headline number.
+
+**Problems:** The 2026-10-23 job's own end-to-end time (953 s) isn't usable:
+it waited ~15 minutes for a worker during Phase 5's partly failed autoscaling
+apply. The 32.8 s existed only in CloudWatch (7-day retention), hence this
+record.
+
+**Interview questions:**
+1. *How do you report latency honestly?* Say what the interval covers (stage,
+   end to end, cold or warm) and on what input; separate the fixed costs
+   (queue wait, cold start) from the per-job work.
+2. *Why did the same-length video take twice as long?* Rendering cost depends
+   on frame content and resolution, not just duration; a looped flat UI
+   compresses and encodes far faster than a real screen recording.
