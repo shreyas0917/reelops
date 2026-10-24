@@ -47,7 +47,13 @@ env:
 jobs:
   plan:
     name: plan
-    if: github.event_name == 'pull_request'
+    # Dependabot and fork PRs get no Actions secrets (so no plan role ARN), and
+    # their code is untrusted until reviewed: they get no AWS access. CI checks
+    # still gate them, and plan-main plans again before the deploy approval.
+    if: >-
+      github.event_name == 'pull_request'
+      && github.event.pull_request.user.login != 'dependabot[bot]'
+      && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
