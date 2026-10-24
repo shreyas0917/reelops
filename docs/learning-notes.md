@@ -2715,3 +2715,38 @@ magic (`:(exclude,glob)frontend/src/**/*.test.ts`); checked with
 2. *Allow-list or deny-list for that filter?* Prefer the failure mode you can
    live with: a deny-list fails towards an extra rebuild, an allow-list fails
    towards shipping stale code.
+
+### Fixes from the failure drills (attempts, ffprobe errors, UI outages)
+
+**What we built:**
+- The worker gives a job up after 3 **real attempts** (the job item's
+  `attempts`, incremented by each claim and now returned by it), not after 3
+  SQS receives; a job whose attempts all died mid-job is failed before it is
+  claimed again (crash-loop guard). SQS `maxReceiveCount` is 10, a backstop
+  for messages no worker can handle.
+- Any ffprobe failure on an upload becomes "<name> isn't an MP4, MOV or WebM
+  video we can read. Export it as MP4 and upload it again."; ffprobe's stderr
+  goes to a WARNING log only.
+- The web UI keeps polling through 503s and network errors, shows "Having
+  trouble reaching ReelOps. Still trying..." only after ~30 s of consecutive
+  failures, and shows the failed state only for a failed job or a 404. Opening
+  a job (reload, link) goes through the same loop ("Loading this video").
+
+**Why this way:** Drill 1b showed SQS receives include harmless releases;
+drill 3 showed raw stderr (temp path, memory address) reaching users; drill 5's
+20 s of 503s would have shown a running job as failed on reload. Each fix has
+a test that reproduces the drill's situation (receive count 3 on a first
+attempt; a text file and a truncated MP4; 10 x 503 then recovery).
+
+**Problems:** Deleting the message on give-up means a job that exhausts its
+retries no longer reaches the DLQ or its alarm (the user sees "failed"); an
+alarm on "gave up" log lines would restore operator visibility.
+
+**Interview questions:**
+1. *Where should a retry budget live for an SQS consumer?* With the work, not
+   the transport: count claims on the job record (atomically, with the claim)
+   and decide there; keep the queue's redrive as a coarse backstop for
+   messages that never get that far.
+2. *How should a polling UI handle errors?* Separate "the resource is gone"
+   (stop, explain) from "I couldn't reach the server" (keep the last state,
+   retry, and only surface a non-blocking notice after a sustained outage).
