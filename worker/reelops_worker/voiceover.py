@@ -142,9 +142,10 @@ def build_voiceover(
     out_wav: Path,
     settings: Settings,
     polly=None,
-) -> Path:
+) -> tuple[Path, str]:
     """Synthesize one clip per segment, place each at its segment start, and
     mix them into a single WAV of exactly `duration` seconds at out_wav.
+    Returns (out_wav, the Polly voice used, which may be the fallback).
     """
     polly = polly or boto3.client("polly", region_name=settings.aws_region)
     voice_id, language = resolve_voice(polly, settings)
@@ -173,4 +174,4 @@ def build_voiceover(
 
     log.info("voice-over: %d clips, %d sped up", len(placed), sped_up)
     _mix(placed, duration, out_wav)
-    return out_wav
+    return out_wav, voice_id

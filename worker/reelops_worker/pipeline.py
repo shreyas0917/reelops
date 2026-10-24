@@ -7,17 +7,25 @@ import shutil
 import tempfile
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import PipelineError, ffmpeg
 from .audio import extract_audio
-from .captions import write_srt
+from .captions import Caption, build_captions, write_srt
 from .config import Settings
 from .render import render
 from .transcribe import load_model, transcribe
 from .voiceover import build_voiceover
 
 log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class Result:
+    output: Path
+    captions: list[Caption]  # as burned in, so the web UI's caption track matches
+    voice: str  # Polly voice actually used
 
 
 @contextmanager
@@ -29,8 +37,8 @@ def _stage(name: str, timings: dict[str, float]):
     log.info("stage %s: done in %.1fs", name, timings[name])
 
 
-def run(video: Path, out_mp4: Path, settings: Settings, *, model=None, polly=None) -> Path:
-    """Turn `video` into a captioned, voiced video at out_mp4 and return it.
+def run(video: Path, out_mp4: Path, settings: Settings, *, model=None, polly=None) -> Result:
+    """Turn `video` into a captioned, voiced video at out_mp4.
 
     Pass a pre-loaded Whisper `model` or a Polly client to reuse them across
     jobs; otherwise they are created here.
@@ -61,12 +69,13 @@ def run(video: Path, out_mp4: Path, settings: Settings, *, model=None, polly=Non
 
         with _stage("captions", timings):
             srt = write_srt(segments, work / "captions.srt", settings.caption_max_chars, settings.caption_max_lines)
+            captions = build_captions(segments, settings.caption_max_chars, settings.caption_max_lines)
 
         with _stage("voiceover", timings):
-            voice = build_voiceover(segments, duration, work, work / "voiceover.wav", settings, polly)
+            voice_wav, voice_id = build_voiceover(segments, duration, work, work / "voiceover.wav", settings, polly)
 
         with _stage("render", timings):
-            rendered = render(video, srt, voice, work / "output.mp4")
+            rendered = render(video, srt, voice_wav, work / "output.mp4")
 
         # Move into place only once complete, so a half-written file never
         # appears at the output path.
@@ -76,4 +85,4 @@ def run(video: Path, out_mp4: Path, settings: Settings, *, model=None, polly=Non
     total = time.perf_counter() - started
     summary = ", ".join(f"{name}={secs:.1f}s" for name, secs in timings.items())
     log.info("done: %s (%.1fs) in %.1fs [%s]", out_mp4, ffmpeg.duration(out_mp4), total, summary)
-    return out_mp4
+    return Result(out_mp4, captions, voice_id)

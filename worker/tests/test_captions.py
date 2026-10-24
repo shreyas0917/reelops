@@ -1,6 +1,6 @@
 import pytest
 
-from reelops_worker.captions import format_timestamp, split_segment, wrap_lines, write_srt
+from reelops_worker.captions import build_captions, format_timestamp, split_segment, wrap_lines, write_srt
 from reelops_worker.transcribe import Segment
 
 
@@ -75,3 +75,12 @@ def test_write_srt_format(tmp_path):
         "1\n00:00:00,000 --> 00:00:01,500\nHello.\n\n"
         "2\n00:00:02,000 --> 00:00:03,250\nWorld.\n"
     )
+
+
+def test_build_captions_matches_srt_entries(tmp_path):
+    segments = [Segment(0.0, 2.0, "aaaaaaaaaa bbbbbbbbbb"), Segment(3.0, 4.0, "Done.")]
+    captions = build_captions(segments, 10, 1)
+    assert [(c.start, c.end, c.lines) for c in captions] == [
+        (0.0, 1.0, ("aaaaaaaaaa",)), (1.0, 2.0, ("bbbbbbbbbb",)), (3.0, 4.0, ("Done.",)),
+    ]
+    assert write_srt(segments, tmp_path / "c.srt", 10, 1).read_text().count(" --> ") == len(captions)

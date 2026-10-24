@@ -67,13 +67,16 @@ def split_segment(segment: Segment, max_chars: int, max_lines: int) -> list[Capt
     return captions
 
 
-def write_srt(segments: list[Segment], out_srt: Path, max_chars: int, max_lines: int) -> Path:
-    """Write segments as SRT to out_srt and return it.
-
-    Long segments are split into several captions so no line exceeds
-    max_chars and no caption exceeds max_lines.
+def build_captions(segments: list[Segment], max_chars: int, max_lines: int) -> list[Caption]:
+    """All captions, in order. Long segments are split into several captions so
+    no line exceeds max_chars and no caption exceeds max_lines.
     """
-    captions = [c for seg in segments for c in split_segment(seg, max_chars, max_lines)]
+    return [c for seg in segments for c in split_segment(seg, max_chars, max_lines)]
+
+
+def write_srt(segments: list[Segment], out_srt: Path, max_chars: int, max_lines: int) -> Path:
+    """Write segments as SRT (see build_captions) to out_srt and return it."""
+    captions = build_captions(segments, max_chars, max_lines)
     blocks = [
         f"{i}\n{format_timestamp(c.start)} --> {format_timestamp(c.end)}\n" + "\n".join(c.lines)
         for i, c in enumerate(captions, start=1)

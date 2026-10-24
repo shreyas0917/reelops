@@ -2,6 +2,7 @@ import json
 import logging
 import time
 import uuid
+from decimal import Decimal
 from pathlib import Path
 from urllib.parse import quote_plus
 
@@ -10,8 +11,10 @@ import pytest
 from moto import mock_aws
 
 from reelops_worker import PipelineError, consumer
+from reelops_worker.captions import Caption
 from reelops_worker.config import Settings
-from reelops_worker.consumer import Consumer, Heartbeat, Shutdown, job_id_from_key, parse_event
+from reelops_worker.consumer import Consumer, Heartbeat, Shutdown, job_id_from_key, parse_event, segments_item
+from reelops_worker.pipeline import Result
 
 REGION = "ap-south-1"
 BUCKET = "reelops-media-test"
@@ -59,6 +62,15 @@ def worker(aws, settings, clock):
     return Consumer(settings, sqs=sqs, s3=s3, table=table, worker_id="worker-me", clock=clock)
 
 
+CAPTIONS = [Caption(0.5, 2.25, ("Welcome to ReelOps.",)), Caption(2.25, 4.1234, ("Upload a", "recording."))]
+
+
+def result(out_mp4, body=b"out"):
+    """What run_pipeline returns, after writing a fake output file."""
+    Path(out_mp4).write_bytes(body)
+    return Result(Path(out_mp4), CAPTIONS, "Kajal")
+
+
 @pytest.fixture
 def fake_pipeline(monkeypatch):
     """Replace the real pipeline (ffmpeg/Whisper/Polly) with a recorder."""
@@ -66,8 +78,7 @@ def fake_pipeline(monkeypatch):
 
     def run(video, out_mp4, settings, *, model=None, polly=None):
         calls.append(Path(video).read_bytes())
-        Path(out_mp4).write_bytes(b"fake rendered video")
-        return Path(out_mp4)
+        return result(out_mp4, b"fake rendered video")
 
     monkeypatch.setattr(consumer, "run_pipeline", run)
     return calls
@@ -163,6 +174,20 @@ def test_pending_job_is_processed(aws, worker, fake_pipeline):
     assert out["Body"].read() == b"fake rendered video"
     assert out["ContentType"] == "video/mp4"
     assert queue_counts(aws) == (0, 0)  # deleted after done
+    # Stored with "done" for the web UI: burned-in captions (lines joined) and the voice.
+    assert item["voice"] == "Kajal"
+    assert item["segments"] == [
+        {"start": Decimal("0.5"), "end": Decimal("2.25"), "text": "Welcome to ReelOps."},
+        {"start": Decimal("2.25"), "end": Decimal("4.123"), "text": "Upload a recording."},
+    ]
+
+
+def test_segments_are_capped_below_the_item_size_limit(caplog):
+    many = [Caption(i, i + 1, ("x" * 100,)) for i in range(consumer.MAX_STORED_CAPTIONS + 5)]
+    stored = segments_item(many)
+    assert len(stored) == consumer.MAX_STORED_CAPTIONS
+    assert "storing the first" in caplog.text
+    assert len(json.dumps(stored, default=str)) < 400_000
 
 
 def test_url_encoded_key_end_to_end(aws, worker, fake_pipeline):
@@ -266,14 +291,14 @@ def test_lost_lease_does_not_mark_done_or_delete(aws, worker, monkeypatch):
             UpdateExpression="SET worker_id = :other",
             ExpressionAttributeValues={":other": "worker-other"},
         )
-        Path(out_mp4).write_bytes(b"late")
-        return Path(out_mp4)
+        return result(out_mp4, b"late")
 
     monkeypatch.setattr(consumer, "run_pipeline", stolen)
     job_id, key = make_job(aws)
     assert worker.handle(deliver(aws, s3_event(key))) == "lost_lease"
     item = job(aws, job_id)
     assert (item["status"], item["worker_id"]) == ("processing", "worker-other")
+    assert "segments" not in item and "voice" not in item
     assert queue_counts(aws) == (0, 1)  # not deleted
 
 
@@ -323,8 +348,7 @@ def test_task_is_protected_while_processing(aws, settings, clock, monkeypatch):
 
     def pipeline(video, out_mp4, settings, **kwargs):
         seen.append(agent.protected)  # state of the fake agent mid-job
-        Path(out_mp4).write_bytes(b"out")
-        return Path(out_mp4)
+        return result(out_mp4)
 
     monkeypatch.setattr(consumer, "run_pipeline", pipeline)
     with fake_agent() as agent:
