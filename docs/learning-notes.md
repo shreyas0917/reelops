@@ -3053,3 +3053,37 @@ cleanup removed all three drill jobs.
 2. *Why let autoscaling do the scale-in in the drill?* It's the production
    path, and a manual desired count is reverted by step scaling while its
    alarm is in ALARM; the drill should exercise what really happens.
+
+### Task 3 — Email when a worker gives up on a job
+
+**What we built:** A CloudWatch Logs metric filter on `/reelops/dev/worker`
+(`ReelOps/WorkerGaveUp`, 1 per match, default 0) and an alarm (Sum >= 1 over
+60 s, missing data = not breaching) that emails via the alerts topic on
+ALARM and on OK. Not gated on `enable_compute`.
+
+**Why this way:** Since PR #9 a job that exhausts its 3 real attempts is
+failed and its message deleted, so it never reaches the DLQ alarm. The worker
+has two give-up lines ("failed on final attempt N; giving up" and the
+crash-loop guard's "gave up after N attempts that never finished"), so the
+pattern `?"; giving up" ?"attempts that never finished"` matches both. It was
+proven with `aws logs test-metric-filter` on lines produced by the real code
+(the consumer tests, in the worker's log format) and real CloudWatch lines:
+3 of 3 give-ups matched, 0 of 14 others (including "error on attempt 1; will
+retry" and the give-up's own traceback line).
+
+**Problems:** The CI deploy role could create alarms but not metric filters
+(`logs:PutMetricFilter`); CI is explicitly denied changing its own role, so
+that permission is applied locally first (`-target`), then the PR deploys the
+filter and alarm through CI. Checked with the IAM policy simulator: allowed on
+`/reelops/*` log groups only. The DLQ alarm's description still says "3
+receives" (stale since PR #9); left for a separate change to keep this PR
+add-only on existing alarms.
+
+**Interview questions:**
+1. *How do you alert on an application event without code changes?* A
+   CloudWatch Logs metric filter turns matching log lines into a metric; an
+   alarm on its Sum notifies via SNS. Test the pattern against real lines,
+   both what must match and what must not.
+2. *Why treat missing data as not breaching here?* No log lines (worker
+   scaled to zero) means nothing gave up; "missing" isn't a failure, and the
+   default would flap to INSUFFICIENT_DATA.

@@ -186,6 +186,8 @@ data "aws_iam_policy_document" "gha_deploy" {
     actions = [
       "logs:CreateLogGroup", "logs:DeleteLogGroup", "logs:PutRetentionPolicy", "logs:DeleteRetentionPolicy",
       "logs:TagResource", "logs:UntagResource", "logs:TagLogGroup", "logs:UntagLogGroup",
+      # Metric filters on these log groups (alarms.tf: worker_gave_up).
+      "logs:PutMetricFilter", "logs:DeleteMetricFilter",
     ]
     resources = ["arn:aws:logs:ap-south-1:${local.account_id}:log-group:/reelops/*"]
   }
