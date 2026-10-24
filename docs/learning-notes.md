@@ -2455,3 +2455,164 @@ Dependabot JSON schema both validated the change before pushing.
 2. *How do you stop Dependabot proposing a major upgrade you're not ready for?*
    An `ignore` rule with `update-types: ["version-update:semver-major"]` for
    that dependency; minor and patch updates (and security updates) continue.
+
+## UI redesign — shipped through the pipeline
+
+### Step 1 — Job details for the new UI (API, worker, IAM)
+
+**What we built:** `GET /jobs/{id}` now also returns `segments`
+(`[{start, end, text}]`, the burned-in captions), `voice` (the Polly voice
+actually used) and `original_preview_url` (a presigned inline GET of the raw
+upload). The worker stores segments and voice on the job; the API task role
+gained `s3:GetObject` on `raw/*`.
+
+**Why this way:**
+- Segments and voice are written in the *same conditional update* that sets
+  `done` (still guarded by `worker_id = me`), so a reader never sees `done`
+  without them and a worker that lost its lease can't write them. Alternative:
+  a second update after `done`, which opens a window with partial data.
+- We store the caption entries (after long segments are split), not raw
+  Whisper segments, so the UI's caption track lines up with what's on screen.
+- The voice comes from the pipeline, not settings: Polly may fall back to the
+  second voice, and the UI should name the one you hear.
+- New URL only once `done`, like the other links (before that the upload may
+  not exist). Separate IAM statement with its reason, instead of widening
+  `SignDownloadUrls`, so each permission documents why it exists.
+
+**Problems:**
+- DynamoDB has no float type: boto3 rejects Python floats, so times are
+  stored as `Decimal` (rounded to ms) and converted back to float in the API.
+- `segments` is a DynamoDB **reserved word**: an update expression using it
+  bare fails with ValidationException (caught by the API test). The worker
+  already used `#f0`-style name placeholders for all extra fields.
+- Item size limit (400 KB): segments are capped at 2000 captions (~1.5 h of
+  speech), with a test that the capped list stays far below the limit.
+
+**Interview questions:**
+1. *Why does the API role need s3:GetObject when the API never reads the
+   video?* A presigned URL is a request signed with the role's credentials;
+   S3 authorizes it as that role when the browser uses it, so the signer needs
+   the permission the URL exercises.
+2. *How do you store floats in DynamoDB from Python?* As `Decimal` (boto3's
+   number type), built from a string to avoid binary float artefacts
+   (`Decimal(f"{x:.3f}")`), and convert back when serialising to JSON.
+
+### Step 2 — Frontend rebuild to the approved design
+
+**What we built:** A light, two-column UI: top bar, upload card, "Your
+videos" (localStorage, Ready/Processing/Failed chips), and a stage card with
+a 16:9 player, a "ReelOps version | Original" toggle, a caption track that
+follows playback, actions and "What ReelOps did" tiles. `?job=<id>` opens a
+job on any device; "Copy job link" shares it. Hanken Grotesk self-hosted via
+`@fontsource/hanken-grotesk` (400/500/600/700, latin only).
+
+**Why this way:**
+- Logic stays in pure modules with unit tests (`track.ts` block maths and
+  active caption, `status.ts` chips/steps/messages, `joblink.ts` URL parsing);
+  components only render. Alternative: test components with a DOM library,
+  more setup for less certainty about the maths.
+- Caption blocks are absolutely positioned by start time, width by duration,
+  so silences show as gaps; the track sits on the dark stage because the
+  accent yellow on white is only 1.3:1, on `#0E1116` it is 12.8:1.
+- `history.replaceState` for `?job=`: the address bar is shareable without
+  filling the back button with job ids. Only real UUIDs are accepted.
+- Contrast was computed for every text/background pair before writing CSS
+  (lowest text pair: muted on the selected row, 4.90:1). Selection also has an
+  ink bar, so it isn't signalled by colour alone.
+
+**Problems:**
+- `navigator.clipboard` exists only in secure contexts, and the ALB is plain
+  HTTP: "Copy job link" falls back to `execCommand("copy")`.
+- Switching `<video src>` resets `currentTime` the moment React commits, so a
+  `useEffect` can't read the old position; the toggle's click handler saves it.
+- Probing the file's duration before upload delayed the UI up to 3 s; it now
+  runs in parallel and is saved when it arrives.
+- `git rm` of the last files in `components/` removed the folder, so the
+  following writes failed until it was recreated.
+
+**Interview questions:**
+1. *Why keep UI state in the URL?* It makes a view linkable, survives reloads
+   and works across devices; validate it (here: UUID only) because anyone can
+   craft a URL, and use `replaceState` for state that shouldn't create history.
+2. *How do you check WCAG AA contrast?* Relative luminance of both colours,
+   ratio `(L1 + 0.05) / (L2 + 0.05)`; AA needs 4.5:1 for body text, 3:1 for
+   large text and for non-text UI parts needed to understand a control.
+
+### Step 2b — Filename on the job; a "Queued" chip
+
+**What we built:** `POST /jobs` stores a sanitized copy of the upload's name
+and `GET /jobs/{id}` returns it as `filename` (null for older jobs), so a
+shared `?job=` link shows the real name on any device; the UI falls back to
+the local name, then "Video <id>". "Your videos" gained a Queued chip.
+
+**Why this way:** The name is only a label (React escapes it, it's never a
+path or a header), but it's shown to anyone with the link, so it's cleaned:
+directory parts dropped, whitespace collapsed, control and format characters
+removed (e.g. U+202E right-to-left override, which can disguise a name as
+`…4pm.mp4`), NFC, 120-character cap keeping the extension. Queued vs
+Processing differ by shape (hollow ring vs filled dot), not only colour.
+
+**Problems:** Newlines and tabs are control characters, so removing controls
+first turned "line\nbreak" into "linebreak"; collapsing whitespace first keeps
+the word break (caught by a parametrized test).
+
+**Interview questions:**
+1. *Why sanitize a value that's already escaped on output?* Escaping stops
+   injection; sanitizing stops deception and breakage (bidi overrides, zero-
+   width characters, path fragments, huge strings) in every place the value is
+   shown or stored.
+2. *What is Unicode normalization (NFC)?* One canonical encoding for text
+   that can be written several ways (é as one code point or e + combining
+   accent), so equal-looking names compare and measure equal.
+
+### Step 3 — Screenshots, review against the design, fixes
+
+**What we built:** A rewritten Playwright suite (24 tests: 12 per width at
+1280 and 380) that screenshots every state (first visit, uploading, queued,
+queued > 30 s, processing, ready, ready while playing, failed) and checks a
+quality floor in each: no horizontal scroll and no control under 44 px.
+Behaviour tests cover the caption track following playback, the toggle
+keeping the position, copy link, a rejected file and keyboard use. README
+images: `docs/ui.png`, `docs/ui-mobile.png`, `docs/ui-processing.png`.
+
+**Why this way:** Screenshots are reviewed by eye, but the measurable rules
+(44 px targets, overflow, focus ring colour, `aria-pressed`) are asserted, so
+they can't silently regress. README images are viewport-sized: a full-page
+phone shot is ~5000 px tall and would swamp the row.
+
+**Problems found in review, and fixes:**
+- The 44 px check failed on the toggle (38 px buttons inside a 44 px frame):
+  each option is now 44 px, pressed = ink fill.
+- Seeking failed in tests: the mocked media server ignored `Range`, and Chrome
+  only seeks media served with 206 Partial Content. The route now answers ranges.
+- A screenshot showed 0:00's frame at 0:14: wait for `requestVideoFrameCallback`
+  after seeking, not just `seeked`.
+- "Waiting for a worker" wrapped inside a pill: replaced by a stepper (dots on
+  a line, labels below).
+- Subtitle on two lines and a broken "re-voices": Hanken Grotesk has no
+  non-breaking hyphen glyph (U+2011 fell back to another font), so a normal
+  hyphen in a `nowrap` span.
+- "Source onGitHub": a flex container drops a trailing space in a child, so a
+  `&nbsp;`; on phones the link reads "GitHub" (full name kept for screen readers).
+- On phones the selected video was below the upload card and list: CSS `order`
+  puts it first when a job is selected.
+- Blank player on phones: mobile browsers paint no frame for
+  `preload="metadata"`; `#t=0.001` fixes it and, being a fragment, never
+  reaches S3, so the presigned signature is unaffected.
+- The test-pattern fixture's burned-in captions didn't match the mocked track.
+  The fixture is now ReelOps' real output for `samples/synthetic.mp4`
+  (29 s, VP9/Opus, 1 MB), and the mocked segments are produced by the worker's
+  own `transcribe` + `build_captions` on that input, so frame and track agree.
+  `samples/demo.mp4` was not used: it's a personal screen recording of another
+  project, not something to publish.
+- The fixture is git-ignored and nothing recorded how it was made:
+  `scripts/make_ui_fixture.sh` now rebuilds it from a synthetic.mp4 output.
+
+**Interview questions:**
+1. *What do you assert in visual tests besides the picture?* Layout invariants
+   that are cheap to measure and easy to break: no horizontal overflow, touch
+   target sizes, focus visibility, ARIA state, and the behaviour behind the
+   screen (e.g. the active caption at a given time).
+2. *Why does seeking need HTTP Range support?* Browsers fetch media in byte
+   ranges; without `Accept-Ranges`/206 responses the media isn't seekable, so
+   setting `currentTime` goes nowhere (S3 supports ranges, a naive mock doesn't).
