@@ -19,7 +19,7 @@ deletes exactly those afterwards. Account IDs are shown as `<account-id>`.
 | 5. API task stopped | PASS (single task: 20 s outage); UI finding (transient 503 shown as a failed job) fixed in PR #9 | 503 for 20 s; 200 again 33 s after the stop |
 | 6. Scale-in protection (run 1: manual scale-in) | INCONCLUSIVE; finding: step scaling reverts manual desired-count changes | n/a |
 | 6. Scale-in protection (run 2: autoscaling scale-in) | PASS (drill script, clean re-run) | idle task stopped 3 s after the scale-in decision; protected 40-min job finished, attempts=1; workers at 0 by autoscaling |
-| 7. Give-up alarm (one injected give-up line) | PASS (ALARM and OK notifications sent; email receipt to confirm) | ALARM 46 s after the line was written; OK 6 min after the ALARM |
+| 7. Give-up alarm (one injected give-up line) | PASS (both emails received: ALARM and OK) | ALARM 46 s after the line was written; OK 6 min after the ALARM |
 
 Relevant settings: SQS visibility timeout 300 s, `maxReceiveCount` 3 before
 PR #9 and 10 after (then the DLQ), job lease 240 s, heartbeat every 60 s, worker shutdown grace 20 s,
@@ -644,9 +644,8 @@ alarm history:
 test stream deleted; alarm OK
 ```
 
-The alarm published to the SNS alerts topic on both transitions (its email
-subscription is confirmed); receipt of these two emails is still to be
-confirmed by the recipient.
+Both emails arrived (confirmed by the recipient): ALARM at 23:47 IST and OK
+at 23:53 IST, matching the alarm history.
 
 **What it proves:** A give-up anywhere in the worker reaches a human by email
 within about a minute, without waiting for the DLQ. Recovery to OK took 6

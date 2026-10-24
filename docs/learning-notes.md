@@ -3093,8 +3093,8 @@ add-only on existing alarms.
 **What we built:** After the deploy, one give-up line written to a separate
 test stream in the worker log group (`aws logs put-log-events`) took the
 `reelops-dev-worker-gave-up` alarm to ALARM 46 s later and back to OK 6
-minutes after that (SNS notified on both transitions); the test stream was
-deleted. It is
+minutes after that; both emails arrived (ALARM 23:47, OK 23:53 IST); the
+test stream was deleted. It is
 drill 7 in `docs/failure-tests.md`.
 
 **Why this way:** Injecting one log line tests the whole chain (metric filter
