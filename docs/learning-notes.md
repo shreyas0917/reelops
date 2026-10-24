@@ -2689,3 +2689,29 @@ re-compression saved only 2 %.
 2. *Lossless vs lossy image optimisation?* Lossless (zlib level, filters)
    keeps every pixel; lossy (palette quantisation, JPEG/WebP) trades fidelity
    for size. UI screenshots with flat colours are usually small enough losslessly.
+
+### Step 3d — Test-only changes don't redeploy the API
+
+**What we built:** `scripts/image_tags.sh` ignores test-only paths when it
+picks the API image tag: `app/tests/`, `app/requirements-dev.txt`,
+`frontend/e2e/`, `frontend/playwright.config.ts` and `frontend/src/**/*.test.ts`.
+A commit touching only those keeps the current tag, so Terraform sees no
+change and nothing is rebuilt or deployed.
+
+**Why this way:** None of those paths reach the runtime image (unit tests gate
+the build but aren't bundled). An *exclude* list rather than an allow-list of
+build inputs: if someone adds a new `COPY` and forgets the list, the exclude
+list errs towards an unnecessary rebuild, while an allow-list would silently
+keep a stale tag. The Dockerfile and `.dockerignore` stay counted.
+
+**Problems:** Git pathspecs: `**` only crosses directories with the `glob`
+magic (`:(exclude,glob)frontend/src/**/*.test.ts`); checked with
+`git ls-files` that it matches every unit-test file and nothing else.
+
+**Interview questions:**
+1. *How do you avoid redeploying on irrelevant commits?* Derive the image tag
+   from the commits that change the image's inputs (path-filtered `git log`),
+   so unchanged inputs mean an unchanged tag and an empty plan.
+2. *Allow-list or deny-list for that filter?* Prefer the failure mode you can
+   live with: a deny-list fails towards an extra rebuild, an allow-list fails
+   towards shipping stale code.
