@@ -1,5 +1,7 @@
-import "@fontsource/schibsted-grotesk/latin-400.css";
-import "@fontsource/schibsted-grotesk/latin-600.css";
+import "@fontsource/hanken-grotesk/latin-400.css";
+import "@fontsource/hanken-grotesk/latin-500.css";
+import "@fontsource/hanken-grotesk/latin-600.css";
+import "@fontsource/hanken-grotesk/latin-700.css";
 import "./styles.css";
 
 import { StrictMode } from "react";

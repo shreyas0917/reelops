@@ -1,32 +1,23 @@
-// Maps where a job is to what the screen says and which stage is lit.
+// Maps where a job is to what the page shows: the stage message, the
+// four-step progress row and the status chip in "Your videos".
 
 export type Phase = "empty" | "uploading" | "queued" | "processing" | "done" | "failed";
-export type StageId = "upload" | "queued" | "processing" | "done";
-export type StageState = "todo" | "active" | "done" | "failed";
+export type StepId = "uploaded" | "waiting" | "processing" | "ready";
+export type StepState = "todo" | "active" | "done" | "failed";
 
-export const STAGES: { id: StageId; label: string }[] = [
-  { id: "upload", label: "Upload" },
-  { id: "queued", label: "Queued" },
+export const STEPS: { id: StepId; label: string }[] = [
+  { id: "uploaded", label: "Uploaded" },
+  { id: "waiting", label: "Waiting for a worker" },
   { id: "processing", label: "Processing" },
-  { id: "done", label: "Done" },
+  { id: "ready", label: "Ready" },
 ];
 
+/** After this long in the queue, explain that a worker is starting from zero. */
 export const SLOW_QUEUE_MS = 30_000;
 
-export interface View {
-  phase: Phase;
-  progress?: number; // 0-100 while uploading
-  queuedForMs?: number; // time spent queued so far
-  error?: string; // already user-facing
-  failedAt?: StageId; // stage that failed, if any
-  dragging?: boolean;
-}
-
-/** API job status -> phase. */
+/** API job status -> phase. Unknown statuses count as still waiting. */
 export function phaseFromStatus(status: string): Phase {
   switch (status) {
-    case "pending":
-      return "queued";
     case "processing":
       return "processing";
     case "done":
@@ -38,72 +29,95 @@ export function phaseFromStatus(status: string): Phase {
   }
 }
 
-export function caption(view: View): string {
-  if (view.dragging) return "Drop to upload";
-  switch (view.phase) {
-    case "empty":
-      return "Drop a screen recording here";
-    case "uploading":
-      return `Uploading ${Math.floor(view.progress ?? 0)}%`;
-    case "queued":
-      return (view.queuedForMs ?? 0) > SLOW_QUEUE_MS
-        ? "Starting a worker. The first job can take about 3 minutes."
-        : "Waiting for a worker to start";
-    case "processing":
-      return "Writing captions and voiceover";
+export type ChipTone = "ready" | "queued" | "processing" | "failed";
+
+/** Status chip in "Your videos". */
+export function chipFor(status: string): { label: string; tone: ChipTone } {
+  switch (status) {
+    case "pending":
+      return { label: "Queued", tone: "queued" }; // uploading, or waiting for a worker
     case "done":
-      return "Ready to watch";
+      return { label: "Ready", tone: "ready" };
     case "failed":
-      return view.error ?? "Something stopped this job. Choose the recording again.";
+      return { label: "Failed", tone: "failed" };
+    default:
+      return { label: "Processing", tone: "processing" };
   }
 }
 
-const ORDER: StageId[] = ["upload", "queued", "processing", "done"];
+const STEP_OF: Partial<Record<Phase, StepId>> = {
+  uploading: "uploaded",
+  queued: "waiting",
+  processing: "processing",
+  done: "ready",
+};
 
-function currentStage(phase: Phase): StageId | null {
+/** State of each step for a phase; `failedAt` marks where a failed job stopped. */
+export function stepStates(phase: Phase, failedAt?: StepId): StepState[] {
+  const ids = STEPS.map((s) => s.id);
+  if (phase === "done") return ids.map(() => "done");
+  if (phase === "failed") {
+    const f = failedAt ? ids.indexOf(failedAt) : -1;
+    return ids.map((_, i) => (f < 0 ? "todo" : i < f ? "done" : i === f ? "failed" : "todo"));
+  }
+  const step = STEP_OF[phase];
+  if (!step) return ids.map(() => "todo");
+  const c = ids.indexOf(step);
+  return ids.map((_, i) => (i < c ? "done" : i === c ? "active" : "todo"));
+}
+
+export interface StageMessage {
+  title: string;
+  detail?: string;
+}
+
+/** Headline and explanation shown on the dark stage while a job is under way. */
+export function stageMessage(phase: Phase, opts: { progress?: number; queuedForMs?: number } = {}): StageMessage {
   switch (phase) {
     case "uploading":
-      return "upload";
+      return {
+        title: `Uploading ${Math.floor(opts.progress ?? 0)}%`,
+        detail: "Keep this page open until the upload finishes.",
+      };
     case "queued":
-      return "queued";
+      return (opts.queuedForMs ?? 0) > SLOW_QUEUE_MS
+        ? {
+            title: "Starting a worker",
+            detail:
+              "Workers scale down to zero when idle, so the first job after a quiet spell waits about 3 minutes for one to start. Later jobs start right away.",
+          }
+        : { title: "Waiting for a worker", detail: "You can close this page. The job keeps running." };
     case "processing":
-      return "processing";
+      return {
+        title: "Transcribing, captioning and voicing",
+        detail: "Usually about as long as the recording itself. You can close this page.",
+      };
     case "done":
-      return "done";
-    default:
-      return null;
+      return { title: "Ready" };
+    case "failed":
+      return { title: "This video didn't finish" };
+    case "empty":
+      return { title: "Drop a screen recording" };
   }
-}
-
-/** State of one timeline stage for the current view. */
-export function stageState(stage: StageId, view: View): StageState {
-  const i = ORDER.indexOf(stage);
-  if (view.phase === "failed") {
-    if (!view.failedAt) return "todo";
-    const f = ORDER.indexOf(view.failedAt);
-    return i < f ? "done" : i === f ? "failed" : "todo";
-  }
-  const current = currentStage(view.phase);
-  if (current === null) return "todo";
-  const c = ORDER.indexOf(current);
-  if (view.phase === "done") return "done";
-  return i < c ? "done" : i === c ? "active" : "todo";
 }
 
 /** Server-side job error -> what went wrong and how to fix it. */
 export function failureMessage(serverError: string | null | undefined): string {
   const e = (serverError ?? "").toLowerCase();
   if (e.includes("no audio stream")) {
-    return "This recording has no sound. Record it with your microphone on, then drop it here.";
+    return "This recording has no sound. Record it again with your microphone on, then upload it.";
   }
   if (e.includes("no speech detected")) {
-    return "No speech was found in this recording. Narrate while you record, then drop it here.";
+    return "No speech was found in this recording. Narrate while you record, then upload it again.";
   }
   if (e.includes("too large")) {
-    return "That recording is over 200 MB. Choose a shorter one.";
+    return "That recording is over 200 MB. Trim it or record a shorter one, then upload it.";
+  }
+  if (e.includes("isn't an mp4, mov or webm")) {
+    return "That file isn't a video ReelOps can read. Export it as MP4, MOV or WebM, then upload it.";
   }
   if (e.includes("gave up after")) {
-    return "Processing failed three times. Wait a few minutes, then drop the recording again.";
+    return "Processing failed three times. Wait a few minutes, then upload the recording again.";
   }
-  return serverError ? `Processing failed: ${serverError}` : "Processing failed. Drop the recording again.";
+  return serverError ? `Processing failed: ${serverError}` : "Processing failed. Upload the recording again.";
 }

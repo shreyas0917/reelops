@@ -1,27 +1,33 @@
-/* ReelOps "screening room". Tokens and contrast: docs/learning-notes.md. */
+/* ReelOps UI. Design tokens and contrast checks: docs/learning-notes.md. */
 
 :root {
-  --stage: #13232a;
-  --screen: #0b1519;
-  --porcelain: #eceae5;
-  --steel: #7c8e95;
-  --yellow: #f2d64b;
-  --signal: #d8574e; /* errors: non-text marks (3:1) */
-  --signal-text: #e0645b; /* errors: text (4.72:1 on stage) */
+  --bg: #f4f5f7;
+  --surface: #ffffff;
+  --ink: #101318;
+  --muted: #5b6270;
+  --hairline: #e3e6eb;
+  --border: #c9ced6;
+  --stage: #0e1116;
+  --stage-muted: rgb(255 255 255 / 0.72); /* 9.97:1 on --stage */
+  --accent: #f5d547; /* only: play button, active caption block, progress */
+  --error: #a8360c;
+  --error-bg: #fcede7;
 
-  /* type scale, 1.25 from 16 px */
+  --radius-card: 16px;
+  --radius-control: 10px;
+  --control-h: 44px;
+
   --fs-13: 0.8125rem;
-  --fs-14: 0.875rem; /* smallest steel text */
+  --fs-14: 0.875rem;
   --fs-16: 1rem;
+  --fs-18: 1.125rem;
   --fs-20: 1.25rem;
-  --fs-25: 1.5625rem;
-  --fs-31: 1.9375rem;
-  --fs-39: 2.4375rem;
+  --fs-40: 2.5rem;
 
-  --gutter: 16px;
-  --max: 960px;
+  --gutter: 24px;
+  --max: 1200px;
 
-  color-scheme: dark;
+  color-scheme: light;
 }
 
 *,
@@ -31,9 +37,9 @@
 }
 
 html {
-  background: var(--stage);
-  color: var(--porcelain);
-  font-family: "Schibsted Grotesk", system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: "Hanken Grotesk", system-ui, sans-serif;
   font-size: 100%;
   line-height: 1.5;
   -webkit-text-size-adjust: 100%;
@@ -41,12 +47,38 @@ html {
 
 body {
   margin: 0;
-  background: var(--stage);
+  background: var(--bg);
 }
 
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+a {
+  color: inherit;
+}
+
+/* One focus style everywhere: ink on light surfaces, white on the dark stage. */
 :focus-visible {
-  outline: 2px solid var(--yellow);
-  outline-offset: 3px;
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+.screen :focus-visible,
+.track :focus-visible {
+  outline-color: #fff;
+}
+
+main:focus,
+.how:focus {
+  outline: none; /* skip-link / anchor targets, not controls */
+}
+
+.nowrap {
+  white-space: nowrap; /* "re-voices it." stays whole: the font has no non-breaking hyphen glyph */
 }
 
 .visually-hidden {
@@ -58,377 +90,856 @@ body {
   white-space: nowrap;
 }
 
-/* ---- page ------------------------------------------------------------------ */
-
-.page {
-  max-width: calc(var(--max) + 2 * var(--gutter));
-  margin: 0 auto;
-  padding: 32px var(--gutter) 48px;
+.skip-link {
+  position: absolute;
+  left: var(--gutter);
+  top: -100px;
+  z-index: 10;
+  padding: 10px 14px;
+  background: var(--ink);
+  color: #fff;
+  border-radius: var(--radius-control);
+  font-weight: 600;
 }
 
-.wordmark {
-  margin: 0;
-  font-size: var(--fs-20);
-  font-weight: 600;
+.skip-link:focus {
+  top: 8px;
+}
+
+/* ---- top bar ----------------------------------------------------------- */
+
+.topbar {
+  background: var(--surface);
+  border-bottom: 1px solid var(--hairline);
+}
+
+.topbar__inner {
+  max-width: var(--max);
+  margin: 0 auto;
+  padding: 0 var(--gutter);
+  min-height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-height: var(--control-h);
+  font-size: var(--fs-18);
+  font-weight: 700;
   letter-spacing: -0.01em;
+  text-decoration: none;
+  color: var(--ink);
+}
+
+.topbar__links {
+  display: flex;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.topbar__links a {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--control-h);
+  padding: 0 12px;
+  border-radius: var(--radius-control);
+  color: var(--muted);
+  font-size: var(--fs-14);
+  font-weight: 500;
+  text-decoration: none;
+}
+
+.topbar__links a:hover {
+  color: var(--ink);
+  background: var(--bg);
+}
+
+/* ---- page layout -------------------------------------------------------- */
+
+.page {
+  max-width: var(--max);
+  margin: 0 auto;
+  padding: 40px var(--gutter) 48px;
 }
 
 .intro {
-  margin: 48px 0 32px;
-  max-width: 40rem;
-}
-
-.nowrap {
-  white-space: nowrap;
+  margin-bottom: 32px;
 }
 
 .intro h1 {
-  margin: 0;
-  font-size: clamp(var(--fs-31), 4vw, var(--fs-39));
-  font-weight: 600;
-  line-height: 1.15;
-  letter-spacing: -0.015em;
+  font-size: var(--fs-40);
+  line-height: 1.1;
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  text-wrap: balance;
+  max-width: 760px;
 }
 
 .intro p {
-  margin: 12px 0 0;
-  color: var(--steel);
-  font-size: var(--fs-16);
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: var(--fs-18);
 }
 
-/* ---- the screen ---------------------------------------------------------- */
-
-.screen {
-  position: relative;
-  aspect-ratio: 16 / 9;
-  background: var(--screen);
-  border: 1px solid var(--steel);
-  border-radius: 2px;
-  overflow: hidden;
-}
-
-.screen[data-droppable="true"] {
-  cursor: pointer;
-}
-
-/* Drag-over: an inset ring, so nothing changes size. */
-.screen[data-dragging="true"] {
-  box-shadow: inset 0 0 0 2px var(--yellow);
-}
-
-.screen video {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  background: #000;
-}
-
-/* Before play, the paused frame is blurred under a flat scrim so its own
-   burned-in caption doesn't collide with ours; both go on play. */
-.screen video[data-started="false"] {
-  filter: blur(10px);
-  transform: scale(1.05); /* hide the blur's soft edges */
-}
-
-/* Flat scrim over the paused finished video, removed on play. */
-.screen__scrim {
-  position: absolute;
-  inset: 0;
-  background: rgb(11 21 25 / 0.62);
-  pointer-events: none;
-}
-
-.screen__play {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  padding: 0;
-  border: 0;
-  background: none;
-  cursor: pointer;
-}
-
-.screen__play:focus-visible {
-  outline-offset: -5px;
-}
-
-.screen__progress {
-  position: absolute;
-  left: 0;
-  bottom: 0;
-  height: 2px;
-  background: var(--yellow);
-}
-
-/* Burned-in subtitle: two lines reserved, bottom-centre, outlined. */
-.caption {
-  position: absolute;
-  left: 6%;
-  right: 6%;
-  bottom: 7%;
-  min-height: calc(2 * 1.3em);
-  display: flex;
-  align-items: flex-end;
-  justify-content: center;
-  margin: 0;
-  font-size: clamp(18px, 2.4vw, 26px);
-  font-weight: 600;
-  line-height: 1.3;
-  text-align: center;
-  color: var(--yellow);
-  text-shadow:
-    0 0 2px #000,
-    0 1px 2px #000;
-  pointer-events: none;
-}
-
-.caption[data-numeric="true"] {
-  font-variant-numeric: tabular-nums;
-}
-
-.caption[data-tone="error"] {
-  color: var(--signal-text);
-}
-
-/* The one motion: the caption changes like a subtitle. */
-.caption__text {
-  animation: caption-in 150ms ease-out;
-}
-
-@keyframes caption-in {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .caption__text {
-    animation: none;
-  }
-}
-
-/* ---- actions --------------------------------------------------------------- */
-
-.actions {
+.workspace {
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
-  gap: 12px 16px;
-  min-height: 48px;
-  margin-top: 16px;
+  align-items: flex-start;
+  gap: 24px;
 }
 
-.actions__hint {
-  margin: 0;
-  color: var(--steel);
+.sidebar {
+  flex: 1 1 320px;
+  max-width: 380px;
+  min-width: 0;
+  display: grid;
+  gap: 24px;
+}
+
+.main-col {
+  flex: 999 1 560px; /* takes the rest; wraps below the sidebar when narrower */
+  min-width: 0;
+}
+
+.page > .how {
+  margin-top: 24px;
+}
+
+.footnote {
+  margin-top: 32px;
+  color: var(--muted);
   font-size: var(--fs-14);
+}
+
+/* ---- cards and controls --------------------------------------------------- */
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-card);
+  padding: 20px;
+}
+
+.card__title {
+  font-size: var(--fs-16);
+  font-weight: 600;
+  margin-bottom: 14px;
 }
 
 .button {
   display: inline-flex;
   align-items: center;
-  min-height: 44px;
+  justify-content: center;
+  gap: 8px;
+  min-height: var(--control-h);
   padding: 0 18px;
-  border: 1px solid var(--steel);
-  border-radius: 6px;
-  background: transparent;
-  color: var(--porcelain);
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
   font: inherit;
   font-size: var(--fs-16);
   font-weight: 600;
+  line-height: 1.2;
   text-decoration: none;
   cursor: pointer;
 }
 
-.button:hover {
-  border-color: var(--porcelain);
-}
-
 .button--primary {
-  border-color: var(--yellow);
-  background: var(--yellow);
-  color: var(--stage);
+  background: var(--ink);
+  color: #fff;
 }
 
 .button--primary:hover {
-  border-color: var(--porcelain);
-  background: var(--porcelain);
+  background: #2a2f38;
 }
 
-/* ---- timeline ---------------------------------------------------------------- */
+.button--outline {
+  background: var(--surface);
+  color: var(--ink);
+  border-color: var(--border);
+}
 
-.timeline {
-  display: flex;
-  align-items: center;
-  margin: 32px 0 0;
-  padding: 0;
-  list-style: none;
+.button--outline:hover {
+  border-color: var(--ink);
+}
+
+.button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.alert {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-control);
+  background: var(--error-bg);
+  color: var(--error);
   font-size: var(--fs-14);
+  font-weight: 500;
 }
 
-.timeline li {
+/* ---- upload card ------------------------------------------------------------ */
+
+.dropzone {
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 8px;
-  color: var(--steel);
+  gap: 12px;
+  padding: 24px 16px;
+  border: 1.5px dashed var(--border);
+  border-radius: var(--radius-control);
+  background: var(--bg);
+  text-align: center;
+  transition: border-color 120ms, background-color 120ms;
 }
 
-.timeline li:not(:first-child) {
-  flex: 1;
+.dropzone[data-large="true"] {
+  min-height: 300px;
+  justify-content: center;
 }
 
-/* connector before every stage but the first */
-.timeline li:not(:first-child)::before {
-  content: "";
-  flex: 1;
-  min-width: 12px;
-  height: 1px;
-  margin: 0 12px;
-  background: var(--steel);
-  opacity: 0.6;
+.dropzone[data-dragging="true"] {
+  border-color: var(--ink);
+  background: var(--hairline);
 }
 
-.timeline__dot {
-  flex: none;
-  width: 10px;
-  height: 10px;
-  border: 1px solid var(--steel);
-  border-radius: 50%;
-}
-
-.timeline li[data-state="done"] {
-  color: var(--porcelain);
-}
-.timeline li[data-state="done"] .timeline__dot {
-  background: var(--steel);
-}
-.timeline li[data-state="active"] {
-  color: var(--porcelain);
-  font-weight: 600;
-}
-.timeline li[data-state="active"] .timeline__dot {
-  border-color: var(--yellow);
-  background: var(--yellow);
-}
-.timeline li[data-state="failed"] {
-  color: var(--porcelain);
-}
-.timeline li[data-state="failed"] .timeline__dot {
-  border-color: var(--signal);
-  background: var(--signal);
-}
-
-/* ---- recent jobs ---------------------------------------------------------------- */
-
-.recent {
-  margin-top: 64px;
-}
-
-.recent h2 {
-  margin: 0 0 8px;
-  font-size: var(--fs-16);
-  font-weight: 600;
-}
-
-.recent__empty {
-  margin: 0;
-  color: var(--steel);
-  font-size: var(--fs-14);
-}
-
-.recent ol {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  border-top: 1px solid rgb(124 142 149 / 0.35);
-}
-
-.recent__row {
+.dropzone__icon {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 7rem 6.5rem;
-  gap: 16px;
-  align-items: baseline;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+}
+
+.dropzone__text {
+  font-weight: 600;
+}
+
+.dropzone__limits {
+  color: var(--muted);
+  font-size: var(--fs-13);
+}
+
+/* ---- your videos -------------------------------------------------------------- */
+
+.videos {
+  padding-bottom: 12px;
+}
+
+.videos__empty {
+  color: var(--muted);
+  font-size: var(--fs-14);
+  padding-bottom: 8px;
+}
+
+.videos__list {
+  margin: 0 -8px;
+  padding: 0;
+  list-style: none;
+}
+
+.videos__row {
   width: 100%;
-  padding: 12px 0;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas: "name chip" "meta chip";
+  align-items: center;
+  column-gap: 12px;
+  min-height: 56px;
+  padding: 8px 10px;
   border: 0;
-  border-bottom: 1px solid rgb(124 142 149 / 0.35);
+  border-radius: var(--radius-control);
   background: none;
-  color: var(--porcelain);
+  color: inherit;
   font: inherit;
-  font-size: var(--fs-16);
   text-align: left;
   cursor: pointer;
+  box-shadow: inset 3px 0 0 transparent;
 }
 
-.recent__row[aria-current="true"] .recent__title {
+.videos__row:hover {
+  background: var(--bg);
+}
+
+.videos__row[aria-current="true"] {
+  background: var(--hairline);
+  box-shadow: inset 3px 0 0 var(--ink); /* selection isn't colour alone */
+}
+
+.videos__name {
+  grid-area: name;
   font-weight: 600;
-}
-
-.recent__title {
+  font-size: var(--fs-14);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.recent__status,
-.recent__time {
-  color: var(--steel);
+.videos__meta {
+  grid-area: meta;
+  color: var(--muted);
+  font-size: var(--fs-13);
+  font-variant-numeric: tabular-nums;
+}
+
+.chip {
+  grid-area: chip;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: var(--fs-13);
+  font-weight: 600;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+
+.chip::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.chip[data-tone="ready"] {
+  background: var(--surface);
+  border-color: var(--border);
+  color: var(--ink);
+}
+
+.chip[data-tone="processing"] {
+  background: var(--surface);
+  border-color: var(--hairline);
+  color: var(--muted);
+}
+
+
+/* Queued: a hollow ring (not started); Processing: a filled dot. Shape, not just colour. */
+.chip[data-tone="queued"] {
+  background: var(--bg);
+  border-color: var(--hairline);
+  color: var(--muted);
+}
+
+.chip[data-tone="queued"]::before {
+  background: transparent;
+  border: 1.5px solid currentColor;
+}
+
+.chip[data-tone="failed"] {
+  background: var(--error-bg);
+  color: var(--error);
+}
+
+/* ---- stage card ----------------------------------------------------------------- */
+
+.stage {
+  padding: 20px;
+}
+
+.stage__header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 16px;
+  margin-bottom: 16px;
+}
+
+.stage__heading {
+  min-width: 0;
+}
+
+.stage__title {
+  font-size: var(--fs-20);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+}
+
+.stage__meta {
+  color: var(--muted);
+  font-size: var(--fs-14);
+  font-variant-numeric: tabular-nums;
+}
+
+.segmented {
+  display: inline-flex;
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.segmented button {
+  min-height: var(--control-h); /* each option is a 44 px target on its own */
+  padding: 0 16px;
+  border: 0;
+  border-radius: 9px; /* sits inside the 1 px border */
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--fs-14);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.segmented button:hover:not([aria-pressed="true"], :disabled) {
+  color: var(--ink);
+}
+
+.segmented button[aria-pressed="true"] {
+  background: var(--ink);
+  color: #fff;
+}
+
+.segmented button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+/* 16:9 dark stage: the player, or the job's status while it runs. */
+.screen {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border-radius: var(--radius-control);
+  background: var(--stage);
+  color: #fff;
+}
+
+.screen video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: var(--stage);
+}
+
+.screen__scrim {
+  position: absolute;
+  inset: 0;
+  background: rgb(14 17 22 / 0.35);
+  pointer-events: none;
+}
+
+.play {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  translate: -50% -50%;
+  display: grid;
+  place-items: center;
+  width: 72px;
+  height: 72px;
+  padding: 0 0 0 4px; /* optical centre of the triangle */
+  border: 0;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--ink);
+  cursor: pointer;
+  box-shadow: 0 6px 24px rgb(0 0 0 / 0.35);
+  transition: scale 120ms;
+}
+
+.play:hover {
+  scale: 1.05;
+}
+
+.screen__message {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+  padding: 24px;
+  text-align: center;
+}
+
+.screen__title {
+  font-size: var(--fs-20);
+  font-weight: 600;
+}
+
+.screen__title[data-numeric="true"] {
+  font-variant-numeric: tabular-nums;
+}
+
+.screen__detail {
+  max-width: 46ch;
+  color: var(--stage-muted);
   font-size: var(--fs-14);
 }
 
-.recent__status[data-status="failed"] {
-  color: var(--signal-text);
+.screen__progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 4px;
+  background: rgb(255 255 255 / 0.12);
+  overflow: hidden;
 }
 
-.recent__time {
-  text-align: right;
+.screen__progress span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 200ms linear;
 }
 
-.footer {
-  margin-top: 48px;
-  color: var(--steel);
+.screen__progress[data-indeterminate="true"] span {
+  width: 30%;
+  animation: indeterminate 1.6s ease-in-out infinite;
+}
+
+@keyframes indeterminate {
+  from {
+    translate: -100% 0;
+  }
+  to {
+    translate: 340% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .screen__progress[data-indeterminate="true"] span {
+    animation: none;
+    width: 100%;
+    opacity: 0.6;
+  }
+}
+
+/* Caption track: a dark strip joined to the player. */
+.track {
+  position: relative;
+  height: 40px;
+  margin-top: 6px;
+  border-radius: var(--radius-control);
+  background: var(--stage);
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.track__block {
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  display: flex;
+  align-items: center;
+  min-width: 2px;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: rgb(255 255 255 / 0.16);
+  box-shadow: inset -1px 0 0 var(--stage), inset 1px 0 0 var(--stage); /* gap between touching blocks */
+  color: rgb(255 255 255 / 0.78);
+  font-size: var(--fs-13);
+  overflow: hidden;
+}
+
+.track__block[data-active="true"] {
+  background: var(--accent);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.track__text {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.track__playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: #fff;
+  pointer-events: none;
+}
+
+/* Four-step progress: dots joined by a line, labels underneath. */
+.steps {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 20px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.steps li {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 0 4px;
+  color: var(--muted);
+  font-size: var(--fs-14);
+  font-weight: 500;
+  line-height: 1.3;
+  text-align: center;
+}
+
+/* The connector into each step: ink once that step is reached. */
+.steps li + li::before {
+  content: "";
+  position: absolute;
+  top: 13px;
+  left: calc(-50% + 20px);
+  right: calc(50% + 20px);
+  height: 2px;
+  border-radius: 1px;
+  background: var(--border);
+}
+
+.steps li + li:not([data-state="todo"])::before {
+  background: var(--ink);
+}
+
+.steps__dot {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border);
+  background: var(--surface);
+  font-size: var(--fs-13);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.steps li:is([data-state="done"], [data-state="active"]) {
+  color: var(--ink);
+}
+
+.steps li:is([data-state="done"], [data-state="active"]) .steps__dot {
+  border-color: var(--ink);
+  background: var(--ink);
+  color: #fff;
+}
+
+.steps li[data-state="active"] {
+  font-weight: 700;
+}
+
+.steps li[data-state="active"] .steps__dot {
+  box-shadow: 0 0 0 4px var(--hairline);
+}
+
+.steps li[data-state="failed"] {
+  color: var(--error);
+  font-weight: 700;
+}
+
+.steps li[data-state="failed"] .steps__dot {
+  border-color: var(--error);
+  background: var(--error);
+  color: #fff;
+  box-shadow: 0 0 0 4px var(--error-bg);
+}
+
+.failure {
+  padding: 20px;
+  border-radius: var(--radius-control);
+  background: var(--error-bg);
+  color: var(--error);
+}
+
+.failure__title {
+  font-size: var(--fs-18);
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.failure p {
+  font-weight: 500;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.actions:empty {
+  display: none;
+}
+
+/* What ReelOps did. */
+.did {
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px solid var(--hairline);
+}
+
+.did__title {
+  font-size: var(--fs-14);
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 12px;
+}
+
+.did__tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.did__tiles li {
+  display: grid;
+  gap: 2px;
+  padding: 14px;
+  border-radius: var(--radius-control);
+  background: var(--bg);
   font-size: var(--fs-14);
 }
 
-/* ---- phones ------------------------------------------------------------------------ */
+.did__tiles strong {
+  font-size: var(--fs-16);
+}
 
-@media (max-width: 600px) {
+.did__tiles span:last-child {
+  color: var(--muted);
+}
+
+.did__check {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  margin-bottom: 6px;
+  border-radius: 50%;
+  background: var(--ink);
+  color: #fff;
+}
+
+/* How it works. */
+.how__steps {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.how__steps li {
+  display: flex;
+  gap: 12px;
+  padding: 16px;
+  border-radius: var(--radius-control);
+  background: var(--bg);
+}
+
+.how__num {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--ink);
+  color: #fff;
+  font-size: var(--fs-14);
+  font-weight: 700;
+}
+
+.how__steps strong {
+  display: block;
+}
+
+.how__text {
+  display: block;
+  color: var(--muted);
+  font-size: var(--fs-14);
+}
+
+.main-col .how__steps {
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+/* ---- phone ---------------------------------------------------------------------- */
+
+@media (max-width: 640px) {
+  :root {
+    --gutter: 16px;
+  }
+
   .page {
     padding-top: 24px;
   }
-  .intro {
-    margin: 32px 0 24px;
+
+  .intro h1 {
+    font-size: 1.875rem;
   }
+
+  .intro p {
+    font-size: var(--fs-16);
+  }
+
+  .sidebar {
+    max-width: none;
+  }
+
+  .topbar__links a {
+    padding: 0 8px;
+  }
+
+  .dropzone[data-large="true"] {
+    min-height: 220px;
+  }
+
+  .button,
+  .dropzone .button {
+    width: 100%;
+  }
+
   .actions {
-    min-height: 80px; /* button + one-line hint: no shift between states */
-    align-content: flex-start;
+    flex-direction: column;
   }
-  .timeline li {
-    gap: 6px;
+
+  .segmented {
+    width: 100%;
   }
-  /* Phones: no connectors (they read as dashes and overflow); spaced dots
-     in order still read as a sequence. */
-  .timeline {
-    justify-content: space-between;
+
+  .segmented button {
+    flex: 1;
   }
-  .timeline li:not(:first-child) {
-    flex: none;
+
+  /* The job you're looking at comes first; the upload card and list follow. */
+  .workspace[data-has-job="true"] .main-col {
+    order: -1;
   }
-  .timeline li:not(:first-child)::before {
-    display: none;
+
+  .wide-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
-  .recent__row {
-    grid-template-columns: minmax(0, 1fr) auto;
-    row-gap: 2px;
-  }
-  .recent__time {
-    grid-column: 1 / -1;
-    text-align: left;
+
+  .card,
+  .stage {
+    padding: 16px;
   }
 }

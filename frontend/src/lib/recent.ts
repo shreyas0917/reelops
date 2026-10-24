@@ -7,6 +7,7 @@ export interface RecentJob {
   title: string; // original filename (the API doesn't store it)
   status: string; // last known API status
   createdAt: number; // epoch ms
+  durationS?: number; // video length, once known
 }
 
 export const RECENT_KEY = "reelops.recent";
