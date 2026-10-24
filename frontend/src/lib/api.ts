@@ -33,6 +33,9 @@ export interface Job {
 /** An error whose message is already written for the user. */
 export class UserFacingError extends Error {}
 
+/** 404 from the API: the job doesn't exist (any more). Never transient. */
+export class JobNotFound extends UserFacingError {}
+
 const UNREACHABLE = "ReelOps isn't responding. Check your connection, then try again.";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -54,7 +57,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       );
     }
     if (response.status === 404) {
-      throw new UserFacingError("That job no longer exists. Jobs are kept for 7 days.");
+      throw new JobNotFound("That job no longer exists. Jobs are kept for 7 days.");
     }
     throw new UserFacingError(UNREACHABLE);
   }

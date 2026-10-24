@@ -9,11 +9,10 @@ import { createJob, getJob, uploadFile, UserFacingError, type Job } from "./lib/
 import { copyText } from "./lib/clipboard";
 import { jobIdFromSearch, withJobId } from "./lib/joblink";
 import { probeDuration } from "./lib/media";
+import { POLL_MS, isFatalPollError, nextFailureCount, showConnectionNotice } from "./lib/poll";
 import { loadRecent, upsertRecent, type RecentJob } from "./lib/recent";
 import { failureMessage, phaseFromStatus, type Phase, type StepId } from "./lib/status";
 import { validateFile } from "./lib/validate";
-
-const POLL_MS = 2000;
 
 interface Current {
   id: string;
@@ -40,6 +39,7 @@ export function App() {
   const [current, setCurrent] = useState<Current | null>(null);
   const [job, setJob] = useState<Job | null>(null);
   const [now, setNow] = useState(() => Date.now());
+  const [pollFailures, setPollFailures] = useState(0); // consecutive; see lib/poll.ts
   const [recent, setRecent] = useState<RecentJob[]>(() => loadRecent());
   const opened = useRef(false);
 
@@ -78,6 +78,7 @@ export function App() {
     setError(undefined);
     setFailedAt(undefined);
     setFileError(undefined);
+    setPollFailures(0);
     showJobInUrl(next?.id ?? null);
   }
 
@@ -109,25 +110,18 @@ export function App() {
     }
   }
 
-  const open = useCallback(
-    async (id: string, title: string) => {
-      setCurrent({ id, title, queuedSince: Date.now() });
-      setJob(null);
-      setError(undefined);
-      setFailedAt(undefined);
-      setFileError(undefined);
-      setPhase("queued");
-      showJobInUrl(id);
-      try {
-        const j = await getJob(id);
-        setCurrent({ id, title, queuedSince: j.updated_at * 1000 });
-        applyJob(j, title);
-      } catch (e) {
-        fail(messageOf(e));
-      }
-    },
-    [applyJob, fail],
-  );
+  // Opening a job only selects it: the poll loop below fetches it, with the
+  // same tolerance for a briefly unreachable API as while a job runs.
+  const open = useCallback((id: string, title: string) => {
+    setCurrent({ id, title, queuedSince: Date.now() });
+    setJob(null);
+    setError(undefined);
+    setFailedAt(undefined);
+    setFileError(undefined);
+    setPollFailures(0);
+    setPhase("loading");
+    showJobInUrl(id);
+  }, []);
 
   function reset() {
     select(null);
@@ -142,19 +136,27 @@ export function App() {
     const id = jobIdFromSearch(window.location.search);
     if (!id) return;
     const known = loadRecent().find((j) => j.id === id);
-    void open(id, known?.title ?? `Video ${id.slice(0, 8)}`);
+    open(id, known?.title ?? `Video ${id.slice(0, 8)}`);
   }, [open]);
 
-  // Poll while the job waits or runs.
+  // Poll while the job loads, waits or runs. A failed poll (503, network)
+  // keeps the last state and polling continues; only a 404 ends it.
   useEffect(() => {
-    if (!current?.id || (phase !== "queued" && phase !== "processing")) return;
+    if (!current?.id || (phase !== "loading" && phase !== "queued" && phase !== "processing")) return;
     let stopped = false;
     const tick = async () => {
       try {
         const j = await getJob(current.id);
-        if (!stopped) applyJob(j, current.title);
-      } catch {
-        // Transient: keep polling; the stage keeps its last state.
+        if (stopped) return;
+        setPollFailures((n) => nextFailureCount(n, true));
+        if (phase === "loading") {
+          setCurrent((c) => (c && c.id === j.job_id ? { ...c, queuedSince: j.updated_at * 1000 } : c));
+        }
+        applyJob(j, current.title);
+      } catch (e) {
+        if (stopped) return;
+        if (isFatalPollError(e)) fail(messageOf(e));
+        else setPollFailures((n) => nextFailureCount(n, false));
       }
     };
     const timer = window.setInterval(tick, POLL_MS);
@@ -163,7 +165,7 @@ export function App() {
       stopped = true;
       window.clearInterval(timer);
     };
-  }, [current, phase, applyJob]);
+  }, [current, phase, applyJob, fail]);
 
   // A clock for "queued for more than 30 s".
   useEffect(() => {
@@ -186,7 +188,7 @@ export function App() {
         <div className="workspace" data-has-job={Boolean(current)}>
           <div className="sidebar">
             <UploadCard large={!current} disabled={phase === "uploading"} error={fileError} onFile={start} />
-            <VideoList jobs={recent} selectedId={current?.id || null} onOpen={(j) => void open(j.id, j.title)} />
+            <VideoList jobs={recent} selectedId={current?.id || null} onOpen={(j) => open(j.id, j.title)} />
           </div>
           <div className="main-col">
             {current ? (
@@ -200,6 +202,7 @@ export function App() {
                 queuedForMs={phase === "queued" ? Math.max(0, now - current.queuedSince) : 0}
                 error={error}
                 failedAt={failedAt}
+                connectionTrouble={showConnectionNotice(pollFailures)}
                 onDuration={(durationS) => remember({ id: current.id, durationS })}
                 onReset={reset}
                 onCopyLink={() => copyText(withJobId(window.location.href, current.id))}

@@ -25,6 +25,7 @@ describe("chipFor", () => {
 describe("stepStates", () => {
   it("lights steps in order", () => {
     expect(stepStates("empty")).toEqual(["todo", "todo", "todo", "todo"]);
+    expect(stepStates("loading")).toEqual(["todo", "todo", "todo", "todo"]); // status unknown: claim nothing
     expect(stepStates("uploading")).toEqual(["active", "todo", "todo", "todo"]);
     expect(stepStates("queued")).toEqual(["done", "active", "todo", "todo"]);
     expect(stepStates("processing")).toEqual(["done", "done", "active", "todo"]);
@@ -39,6 +40,10 @@ describe("stepStates", () => {
 });
 
 describe("stageMessage", () => {
+  it("doesn't guess a job's state while it loads", () => {
+    expect(stageMessage("loading").title).toBe("Loading this video");
+  });
+
   it("shows upload progress as a whole percentage", () => {
     expect(stageMessage("uploading", { progress: 42.7 }).title).toBe("Uploading 42%");
   });
