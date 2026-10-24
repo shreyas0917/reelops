@@ -18,7 +18,7 @@ deletes exactly those afterwards. Account IDs are shown as `<account-id>`.
 | 4. Unprocessable message -> DLQ -> alarm | PASS before and after the fix (both runs' ALARM and OK emails received) | before: DLQ after 3 receives (18.5 min); after: 10 receives (54.6 min); ALARM ~3 min later; OK ~3 min after the purge |
 | 5. API task stopped | PASS (single task: 20 s outage); UI finding (transient 503 shown as a failed job) fixed in PR #9 | 503 for 20 s; 200 again 33 s after the stop |
 | 6. Scale-in protection (run 1: manual scale-in) | INCONCLUSIVE; finding: step scaling reverts manual desired-count changes | n/a |
-| 6. Scale-in protection (run 2: autoscaling scale-in) | PASS (observed; drill script re-run pending) | idle task stopped 6 s after the scale-in decision; protected job finished, attempts=1 |
+| 6. Scale-in protection (run 2: autoscaling scale-in) | PASS (drill script, clean re-run) | idle task stopped 3 s after the scale-in decision; protected 40-min job finished, attempts=1; workers at 0 by autoscaling |
 
 Relevant settings: SQS visibility timeout 300 s, `maxReceiveCount` 3 (then
 the DLQ), job lease 240 s, heartbeat every 60 s, worker shutdown grace 20 s,
@@ -536,17 +536,48 @@ that give up no longer reach the DLQ at all; an alarm on the worker's
 **How it was run:** The redesigned `scripts/chaos/test6_scale_in_protection.sh`
 submits a 40-minute job (45 MB) and two 31 s jobs; autoscaling runs two
 workers; when the short jobs finish, the backlog drops to 1 and autoscaling
-itself scales in to one task while the long job is processing. The script hit
-a harness bug while identifying the busy task (its log-stream lookup printed
-an extra `None` page under CLI pagination; fixed), so the rest of this run was
-recorded by observing the service directly. A clean script re-run is planned
-for the Phase 9 session.
+itself scales in to one task while the long job is processing. The first
+attempt hit a harness bug while identifying the busy task (its log-stream
+lookup printed an extra `None` page under CLI pagination; fixed), so that run
+was recorded by observing the service directly; a clean re-run of the fixed
+script followed (below).
 
 **Expected:** ECS stops the idle task (protection off) and keeps the busy one
 (protection on), which finishes its job (attempts=1, one output) and turns
 protection off; autoscaling then scales in to 0 by itself.
 
-**Actual:** As expected.
+**Actual (clean re-run, 2026-10-24 17:23-18:00 UTC):** As expected; the
+script printed PASS. Pre-checks: queue and DLQ empty, worker service at 0/0,
+no local containers; live images `api=18c6c5e`, `worker=0ec6fb3`.
+
+```
+17:23:45 inputs: walkthrough-40min.mp4 (45 MB, 2483s) + 2 x 31 s
+17:23:46 worker service desired/running: 0/0
+17:23:47 submitted long eb86b545-... and short 5a00cd02-..., d8d6a2b2-...
+17:27:23 2 workers running 217s after submitting
+17:27:33 busy 82481463 protection=true; idle 29f8b4a6b8d5466e99a9f6f9b48fc9e8 protection=false
+17:31:51 scale-in: ECS stopped the idle task 254s after the short jobs finished;
+         busy task kept; long job: status=processing attempts=1
+17:47:26 long job done 936s after the scale-in: status=done attempts=1, outputs=1
+scaling activities:
+17:26:43 Setting desired count to 2.
+17:31:43 Setting desired count to 1.
+17:59:51 Setting desired count to 0.
+service events:
+17:26:53 has started 2 tasks: (task 29f8b4a6...) (task 82481463...)
+17:31:46 has stopped 1 running tasks: (task 29f8b4a6...)
+busy task 82481463 log:
+17:27:23 consumer: job eb86b545-...: claimed by ip-10-20-1-47...-7-258adb (attempt 1, receive 1)
+17:27:23 protection: task protection on
+17:47:23 consumer: job eb86b545-...: done -> s3://reelops-media-<account-id>/output/eb86b545-....mp4
+17:47:23 protection: task protection off
+18:00:05 workers at 0, 761s after the last job
+PASS test6-scale-in-protection: autoscaling scale-in stopped the idle task and
+kept the protected one, which finished its job (attempts=1, 1 output);
+workers at 0 761s after the last job
+```
+
+The first, observed attempt (15:34-15:57 UTC) showed the same sequence:
 
 ```
 15:34:09 submitted long 9c25d3a8-... (2483 s) and short e1b0f587-..., 251db9d6-...
@@ -571,7 +602,9 @@ busy task 01e9b2b3 log:
 ```
 
 **What it proves:** When autoscaling scales in, ECS chooses the idle worker
-and never the one holding a job (6 s from the scale-in decision to the idle
-task stopping); the protected job finished on its first attempt, and its
-worker dropped protection as soon as it was done. Autoscaling kept control
-throughout and scaled to zero 12 minutes after the last job.
+and never the one holding a job (3 s from the scale-in decision to the idle
+task stopping in the clean run, 6 s in the observed one); the protected job
+finished on its first attempt, and its worker turned protection on at the
+claim and off the moment the job was done. Autoscaling kept control
+throughout (never suspended) and scaled to zero ~12 minutes after the last
+job. The drill script now proves this end to end on its own.

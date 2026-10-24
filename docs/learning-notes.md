@@ -3028,3 +3028,28 @@ of the fix: a `*.auto.tfvars` value overrides a variable's default.
    each image's version from the commits that touch its build inputs (its
    Dockerfile's sources and context), exclude tests and docs, and test the
    rule itself.
+
+### Task 2 — Clean re-run of drill 6 (scale-in protection)
+
+**What we built:** The fixed drill script ran end to end and printed PASS:
+with two workers, autoscaling's scale-in (desired 2 -> 1) stopped the idle,
+unprotected task 3 s after its decision, while the protected task kept its
+40-minute job (protection on at the claim, off the moment it finished,
+attempts=1, one output); autoscaling then scaled to 0 by itself.
+
+**Why this way:** The earlier run proved the behaviour by observation only;
+a drill is only a regression test if the script itself reaches PASS. Explicit
+pre-checks (empty queue and DLQ, 0 workers, no local containers) make the
+result attributable to this run alone.
+
+**Problems:** None this time: the pagination fix (`job_stream`) held, and
+cleanup removed all three drill jobs.
+
+**Interview questions:**
+1. *How do you know an ECS task-protection drill really tested protection?*
+   Show both tasks' protection state before the scale-in (one true, one
+   false), that the job was still running when the scale-in happened, which
+   task ECS stopped, and that the job finished on its first attempt.
+2. *Why let autoscaling do the scale-in in the drill?* It's the production
+   path, and a manual desired count is reverted by step scaling while its
+   alarm is in ALARM; the drill should exercise what really happens.
