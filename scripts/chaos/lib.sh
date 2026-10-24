@@ -72,7 +72,8 @@ job_field() {
   aws dynamodb get-item --table-name "$TABLE" --key "{\"job_id\": {\"S\": \"$1\"}}" --consistent-read \
     --output json | python3 -I -c '
 import json, sys
-item = json.load(sys.stdin).get("Item", {})
+raw = sys.stdin.read()  # empty when there is no such item
+item = json.loads(raw).get("Item", {}) if raw.strip() else {}
 value = item.get(sys.argv[1], {})
 print(next(iter(value.values()), "") if value else "")' "$2"
 }
