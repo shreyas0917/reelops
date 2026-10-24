@@ -1,0 +1,13 @@
+{
+  "comment": "Timeline for scripts/make_ui_fixture.sh: each step's sentence is narrated from `at` seconds while record.mjs performs `do`. A sentence must end before the next step starts. The invented product name is shown, not spoken: Whisper misspells made-up names.",
+  "durationS": 31,
+  "voice": "Matthew",
+  "steps": [
+    {"at": 0.6, "do": "overview", "say": "This is the billing dashboard for the Studio North workspace."},
+    {"at": 6.4, "do": "openSettings", "say": "To change where invoices go, open Settings in the sidebar."},
+    {"at": 11.2, "do": "openBilling", "say": "Then select the Billing tab to see the plan and the payment method."},
+    {"at": 16.4, "do": "editEmail", "say": "Replace the billing email with the finance team's address."},
+    {"at": 21.8, "do": "save", "say": "Save the changes, and a confirmation appears at the top."},
+    {"at": 26.4, "do": "outro", "say": "ReelOps added these captions and the new voice for you."}
+  ]
+}

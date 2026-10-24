@@ -2,32 +2,30 @@ import { readFileSync } from "node:fs";
 
 import { expect, test, type Page } from "@playwright/test";
 
+import { formatClock } from "../src/lib/time";
+
 const JOB_ID = "6f1d2c3a-4b5e-4f60-8a71-92b3c4d5e6f7";
 const NOW = Date.now();
 const H = 3600_000;
 const FILE = "billing-settings-walkthrough.mp4";
-// 29 s, 960x540 VP9/Opus (Playwright's Chromium has no H.264): ReelOps' own output for
-// samples/synthetic.mp4 (scripts/make_sample.sh), a narrated test pattern.
-// Git-ignored; rebuild it with scripts/make_ui_fixture.sh.
+// The "finished video" is real ReelOps output: a scripted walkthrough of an
+// invented app, narrated with Polly and run through the worker pipeline. The
+// segments, duration and voice come from that run. All git-ignored; rebuild
+// with scripts/make_ui_fixture.sh.
 const VIDEO = readFileSync("e2e/fixtures/done.webm");
+const ORIGINAL = readFileSync("e2e/fixtures/original.webm");
+const FIXTURE: { durationS: number; voice: string; segments: { start: number; end: number; text: string }[] } =
+  JSON.parse(readFileSync("e2e/fixtures/fixture.json", "utf8"));
+const SEGMENTS = FIXTURE.segments;
+// Screenshot moment: late in "Save the changes...", when the saved toast shows.
+const SHOT = SEGMENTS.findIndex((seg) => /confirmation/i.test(seg.text));
+const SHOT_T = SEGMENTS[SHOT].end - 0.8;
 
 // Realistic history, so "Your videos" isn't empty (except on a first visit).
 const SEEDED = [
   { id: "a2", title: "onboarding-tour.mov", status: "done", createdAt: NOW - 26 * H, durationS: 94 },
   { id: "a3", title: "q3-roadmap-demo.webm", status: "failed", createdAt: NOW - 4 * 24 * H },
   { id: "a4", title: "team-invites.mp4", status: "done", createdAt: NOW - 6 * 24 * H, durationS: 47 },
-];
-
-// The captions burned into the fixture, from the worker's own transcribe +
-// build_captions run on samples/synthetic.mp4 ("from peg" is Whisper's, for FFmpeg).
-const SEGMENTS = [
-  { start: 0.0, end: 2.0, text: "Welcome to Reel Ops." },
-  { start: 2.0, end: 7.0, text: "In this demo, we upload a screen recording and let the pipeline do the rest." },
-  { start: 7.0, end: 12.0, text: "First, the worker extracts the audio and transcribes it with whisper." },
-  { start: 12.0, end: 18.23, text: "Next, it writes captions and asks Amazon Polly for a fresh voiceover, one sentence" },
-  { start: 18.23, end: 19.0, text: "at a time." },
-  { start: 19.0, end: 24.0, text: "Finally, from peg burns and the captions and swaps in the new audio." },
-  { start: 24.0, end: 28.0, text: "The result is a polished demo video, ready to share." },
 ];
 
 const job = (status: string, extra: Record<string, unknown> = {}) => ({
@@ -51,7 +49,7 @@ const DONE = job("done", {
   download_url: "https://mock-media.example/download.mp4",
   original_preview_url: "https://mock-media.example/original.webm",
   segments: SEGMENTS,
-  voice: "Kajal",
+  voice: FIXTURE.voice,
 });
 
 /** Mock the API and the S3 upload; `upload` = "hold" stops at 42%. */
@@ -102,15 +100,16 @@ async function setup(page: Page, opts: { upload?: "hold" | "complete"; jobJson?:
   if (jobJson) await page.route(`**/jobs/${JOB_ID}`, (route) => route.fulfill({ json: jobJson }));
   // Media "S3" with Range support: Chrome can only seek a video whose server answers 206.
   await page.route("https://mock-media.example/**", (route) => {
+    const media = route.request().url().includes("original") ? ORIGINAL : VIDEO;
     const range = /bytes=(\d+)-(\d*)/.exec(route.request().headers()["range"] ?? "");
     const headers = { "Accept-Ranges": "bytes", "Content-Type": "video/webm" };
-    if (!range) return route.fulfill({ body: VIDEO, headers });
+    if (!range) return route.fulfill({ body: media, headers });
     const start = Number(range[1]);
-    const end = range[2] ? Math.min(Number(range[2]), VIDEO.length - 1) : VIDEO.length - 1;
+    const end = range[2] ? Math.min(Number(range[2]), media.length - 1) : media.length - 1;
     return route.fulfill({
       status: 206,
-      body: VIDEO.subarray(start, end + 1),
-      headers: { ...headers, "Content-Range": `bytes ${start}-${end}/${VIDEO.length}` },
+      body: media.subarray(start, end + 1),
+      headers: { ...headers, "Content-Range": `bytes ${start}-${end}/${media.length}` },
     });
   });
 }
@@ -140,6 +139,14 @@ async function seekAndPaint(page: Page, t: number) {
       }),
     t,
   );
+}
+
+/**
+ * Screenshots show a clean paused frame: the app shows native controls once a
+ * video has started, and their bar would cover the burned-in caption.
+ */
+async function hideControls(page: Page) {
+  await page.locator(".screen video").evaluate((v: HTMLVideoElement) => (v.controls = false));
 }
 
 /** Quality floor for every state, then a full-page screenshot. */
@@ -231,17 +238,16 @@ test("ready", async ({ page }) => {
   await pickFile(page);
   await expect(page.getByRole("link", { name: "Download video" })).toBeVisible();
   await videoReady(page);
-  await expect(page.locator(".stage__meta")).toHaveText("0:29 · Ready in 3 min 10 s");
+  await expect(page.locator(".stage__meta")).toHaveText(`${formatClock(FIXTURE.durationS)} · Ready in 3 min 10 s`);
   await expect(page.locator(".track__block")).toHaveCount(SEGMENTS.length);
   await expect(page.locator(".did__tiles li")).toHaveText([
-    /Transcribed\s*7 caption segments/,
+    new RegExp(`Transcribed\\s*${SEGMENTS.length} caption segments`),
     /Captioned\s*Burned into the video/,
-    /Voiced\s*Kajal, Amazon Polly/,
-    /Rendered\s*MP4, 0:29/,
+    new RegExp(`Voiced\\s*${FIXTURE.voice}, Amazon Polly`),
+    new RegExp(`Rendered\\s*MP4, ${formatClock(FIXTURE.durationS)}`),
   ]);
   expect((await chips(page))[0]).toBe("Ready");
   await shot(page, "ready");
-  await docsShot(page, "380", "ui-mobile.png", { width: 380, height: 800 });
 });
 
 test("ready, playing: the caption track follows playback", async ({ page }) => {
@@ -251,12 +257,14 @@ test("ready, playing: the caption track follows playback", async ({ page }) => {
   await page.getByRole("button", { name: "Play video" }).click();
   const video = page.locator(".screen video");
   await expect(video).toHaveAttribute("controls", "");
-  // Pause inside the fourth caption, then after the last one (28-29 s has no caption).
-  await seekAndPaint(page, 14);
-  await expect(page.locator('.track__block[data-active="true"]')).toHaveText(SEGMENTS[3].text);
+  // Pause inside a caption, then after the last one (the video runs on past it).
+  await seekAndPaint(page, SHOT_T);
+  await expect(page.locator('.track__block[data-active="true"]')).toHaveText(SEGMENTS[SHOT].text);
+  await hideControls(page);
   await shot(page, "ready-playing");
   await docsShot(page, "1280", "ui.png", { width: 1280, height: 1100 });
-  await video.evaluate((v: HTMLVideoElement) => (v.currentTime = 28.5));
+  await docsShot(page, "380", "ui-mobile.png", { width: 380, height: 800 });
+  await video.evaluate((v: HTMLVideoElement, t: number) => (v.currentTime = t), SEGMENTS[SEGMENTS.length - 1].end + 0.5);
   await expect(page.locator('.track__block[data-active="true"]')).toHaveCount(0);
 });
 

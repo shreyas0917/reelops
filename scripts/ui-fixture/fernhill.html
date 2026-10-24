@@ -1,0 +1,224 @@
+<!doctype html>
+<!--
+  "Fernhill Billing": an invented product for the screenshot fixture
+  (scripts/make_ui_fixture.sh). No real brands or people; example.com emails.
+  Palette follows ReelOps' tokens plus one muted blue. record.mjs inlines the
+  Hanken Grotesk files at __FONT_400__ etc. and drives it at 1280x720.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Fernhill Billing</title>
+    <style>
+      @font-face { font-family: "Hanken Grotesk"; font-weight: 400; src: url(__FONT_400__) format("woff2"); }
+      @font-face { font-family: "Hanken Grotesk"; font-weight: 500; src: url(__FONT_500__) format("woff2"); }
+      @font-face { font-family: "Hanken Grotesk"; font-weight: 600; src: url(__FONT_600__) format("woff2"); }
+      @font-face { font-family: "Hanken Grotesk"; font-weight: 700; src: url(__FONT_700__) format("woff2"); }
+
+      :root {
+        --bg: #f4f5f7;
+        --surface: #ffffff;
+        --ink: #101318;
+        --muted: #5b6270;
+        --hairline: #e3e6eb;
+        --border: #c9ced6;
+        --blue: #4a6fa5; /* the one accent */
+        --blue-soft: #e8eef6;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; }
+      body {
+        display: grid;
+        grid-template-columns: 232px 1fr;
+        background: var(--bg);
+        color: var(--ink);
+        font: 15px/1.45 "Hanken Grotesk", system-ui, sans-serif;
+        overflow: hidden;
+        cursor: none;
+      }
+
+      /* sidebar */
+      aside {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        padding: 20px 14px;
+        background: var(--surface);
+        border-right: 1px solid var(--hairline);
+      }
+      .logo { display: flex; align-items: center; gap: 10px; padding: 4px 10px 22px; font-weight: 700; font-size: 17px; }
+      .logo i {
+        display: grid; place-items: center; width: 30px; height: 30px; border-radius: 9px;
+        background: var(--blue); color: #fff; font-style: normal; font-size: 15px;
+      }
+      .nav {
+        display: flex; align-items: center; gap: 12px; padding: 9px 10px; border-radius: 9px;
+        color: var(--muted); font-weight: 500;
+      }
+      .nav svg { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 1.7; }
+      .nav.on { background: var(--blue-soft); color: var(--blue); font-weight: 600; }
+      .workspace {
+        margin-top: auto; display: flex; align-items: center; gap: 10px; padding: 10px;
+        border: 1px solid var(--hairline); border-radius: 10px; font-size: 14px;
+      }
+      .avatar {
+        display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%;
+        background: var(--bg); border: 1px solid var(--hairline); font-size: 12px; font-weight: 700; color: var(--muted);
+      }
+      .workspace small { display: block; color: var(--muted); font-size: 12px; }
+
+      /* main */
+      main { padding: 26px 34px; overflow: hidden; }
+      header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 22px; }
+      h1 { margin: 0; font-size: 24px; letter-spacing: -0.01em; }
+      .search {
+        width: 260px; padding: 9px 12px; border: 1px solid var(--hairline); border-radius: 10px;
+        background: var(--surface); color: var(--muted); font-size: 14px;
+      }
+      .card { background: var(--surface); border: 1px solid var(--hairline); border-radius: 14px; padding: 18px 20px; }
+      .kpis { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 18px; }
+      .kpi small { color: var(--muted); font-weight: 500; }
+      .kpi b { display: block; margin-top: 6px; font-size: 28px; letter-spacing: -0.02em; }
+      .kpi span { color: var(--muted); font-size: 13px; }
+      .card h2 { margin: 0 0 12px; font-size: 16px; }
+      table { width: 100%; border-collapse: collapse; font-size: 14px; }
+      th { text-align: left; color: var(--muted); font-weight: 500; padding: 8px 0; border-bottom: 1px solid var(--hairline); }
+      td { padding: 10px 0; border-bottom: 1px solid var(--hairline); }
+      tr:last-child td { border-bottom: 0; }
+      .pill { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--bg); color: var(--muted); }
+      .pill.paid { background: var(--blue-soft); color: var(--blue); }
+
+      .tabs { display: flex; gap: 6px; margin-bottom: 18px; border-bottom: 1px solid var(--hairline); }
+      .tab { padding: 10px 14px; color: var(--muted); font-weight: 600; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+      .tab.on { color: var(--ink); border-color: var(--blue); }
+      .grid2 { display: grid; grid-template-columns: 1.1fr 1fr; gap: 16px; }
+      .plan b { font-size: 22px; }
+      .plan p, .method p { margin: 4px 0 0; color: var(--muted); }
+      .method { display: flex; align-items: center; gap: 14px; }
+      .chipcard { width: 52px; height: 36px; border-radius: 7px; background: linear-gradient(135deg, #dfe5ee, #c9d3e1); border: 1px solid var(--border); }
+      label { display: block; margin: 16px 0 6px; font-weight: 600; font-size: 14px; }
+      .field {
+        width: 100%; padding: 11px 12px; border: 1px solid var(--border); border-radius: 10px;
+        font: inherit; color: var(--ink); background: var(--surface); outline: none;
+      }
+      .field:focus { border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-soft); }
+      .hint { margin-top: 6px; color: var(--muted); font-size: 13px; }
+      .actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+      .btn { padding: 11px 18px; border-radius: 10px; font: inherit; font-weight: 600; border: 1px solid var(--border); background: var(--surface); color: var(--ink); }
+      .btn.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
+      [hidden] { display: none !important; }
+
+      .toast {
+        position: fixed; top: 22px; left: 50%; translate: -50% -16px; opacity: 0;
+        display: flex; align-items: center; gap: 10px; padding: 12px 18px; border-radius: 12px;
+        background: var(--ink); color: #fff; font-weight: 600; box-shadow: 0 10px 30px rgb(16 19 24 / 0.2);
+        transition: opacity 250ms, translate 250ms;
+      }
+      .toast.show { opacity: 1; translate: -50% 0; }
+      .toast i { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: #fff; color: var(--ink); font-style: normal; font-size: 12px; }
+
+      /* Playwright's video has no pointer: draw one. */
+      #cursor {
+        position: fixed; left: 0; top: 0; z-index: 99; width: 22px; height: 22px; pointer-events: none;
+        translate: 640px 360px; filter: drop-shadow(0 2px 3px rgb(0 0 0 / 0.3));
+      }
+      #ripple {
+        position: fixed; z-index: 98; width: 34px; height: 34px; margin: -17px 0 0 -17px; border-radius: 50%;
+        border: 2px solid var(--blue); opacity: 0; pointer-events: none;
+      }
+      #ripple.go { animation: ripple 450ms ease-out; }
+      @keyframes ripple { from { opacity: 0.9; scale: 0.4; } to { opacity: 0; scale: 1.4; } }
+    </style>
+  </head>
+  <body>
+    <aside>
+      <div class="logo"><i>F</i>Fernhill Billing</div>
+      <div class="nav on" data-nav="overview"><svg viewBox="0 0 24 24"><path d="M4 13h6V4H4zm10 7h6v-9h-6zM4 20h6v-4H4zm10-11h6V4h-6z"/></svg>Overview</div>
+      <div class="nav"><svg viewBox="0 0 24 24"><path d="M7 3h10v18l-5-3-5 3z"/></svg>Invoices</div>
+      <div class="nav"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6M16 4.5a3.5 3.5 0 0 1 0 7M21 20c0-2.6-1.6-4.8-4-5.6"/></svg>Customers</div>
+      <div class="nav"><svg viewBox="0 0 24 24"><path d="M4 20V10m6 10V4m6 16v-7m4 7H3"/></svg>Reports</div>
+      <div class="nav" data-nav="settings" id="nav-settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-2.9-1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.7 1.7 0 0 0 3 15.1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.2-2.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.7 1.7 0 0 0 9 4.6V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 2.9 1.2l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0 1.2 2.9H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>Settings</div>
+      <div class="workspace"><span class="avatar">SN</span><div>Studio North<small>Growth plan</small></div></div>
+    </aside>
+
+    <main>
+      <section id="view-overview">
+        <header><h1>Overview</h1><div class="search">Search invoices and customers</div></header>
+        <div class="kpis">
+          <div class="card kpi" id="kpi-revenue"><small>Revenue this month</small><b>$48,210</b><span>+8.4% on last month</span></div>
+          <div class="card kpi"><small>Open invoices</small><b>23</b><span>$12,640 outstanding</span></div>
+          <div class="card kpi"><small>Overdue</small><b>4</b><span>Oldest: 12 days</span></div>
+        </div>
+        <div class="card" id="recent">
+          <h2>Recent invoices</h2>
+          <table>
+            <tr><th>Invoice</th><th>Customer</th><th>Issued</th><th>Amount</th><th>Status</th></tr>
+            <tr><td>INV-2041</td><td>Harbor &amp; Pine</td><td>21 Oct</td><td>$3,200.00</td><td><span class="pill paid">Paid</span></td></tr>
+            <tr><td>INV-2040</td><td>Maple Street Studio</td><td>19 Oct</td><td>$1,180.00</td><td><span class="pill">Open</span></td></tr>
+            <tr><td>INV-2039</td><td>Quartzline Labs</td><td>17 Oct</td><td>$6,450.00</td><td><span class="pill paid">Paid</span></td></tr>
+            <tr><td>INV-2038</td><td>Bluegate Supply</td><td>14 Oct</td><td>$920.00</td><td><span class="pill">Open</span></td></tr>
+          </table>
+        </div>
+      </section>
+
+      <section id="view-settings" hidden>
+        <header><h1>Settings</h1><div class="search">Search settings</div></header>
+        <div class="tabs">
+          <div class="tab on" data-tab="general">General</div>
+          <div class="tab" data-tab="billing" id="tab-billing">Billing</div>
+          <div class="tab">Team</div>
+          <div class="tab">Notifications</div>
+        </div>
+        <div id="tab-general">
+          <div class="card">
+            <label>Workspace name</label><div class="field">Studio North</div>
+            <label>Time zone</label><div class="field">(UTC+05:30) Kolkata</div>
+            <label>Currency</label><div class="field">US dollar (USD)</div>
+          </div>
+        </div>
+        <div id="tab-billing-panel" hidden>
+          <div class="grid2">
+            <div class="card plan" id="plan"><small style="color: var(--muted)">Current plan</small><br /><b>Growth</b><p>$49 per month · renews on 1 December</p></div>
+            <div class="card method"><span class="chipcard"></span><div><b>Card ending 1881</b><p>Expires 08/28</p></div></div>
+          </div>
+          <div class="card" style="margin-top: 16px">
+            <label for="email">Billing email</label>
+            <input class="field" id="email" value="ops@example.com" />
+            <div class="hint">Invoices and receipts are sent to this address.</div>
+            <label>Tax ID</label><div class="field">Not set</div>
+            <div class="actions"><span class="btn">Cancel</span><span class="btn primary" id="save">Save changes</span></div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <div class="toast" id="toast"><i>✓</i>Billing settings saved</div>
+    <div id="ripple"></div>
+    <svg id="cursor" viewBox="0 0 24 24"><path d="M4 2.5 19 13l-6.6 1.3L9 20.6z" fill="#101318" stroke="#fff" stroke-width="1.6" stroke-linejoin="round"/></svg>
+
+    <script>
+      const $ = (s) => document.querySelector(s);
+      // The fake pointer follows real mouse events, so record.mjs just moves the mouse.
+      addEventListener("mousemove", (e) => ($("#cursor").style.translate = `${e.clientX - 4}px ${e.clientY - 2}px`));
+      addEventListener("mousedown", (e) => {
+        const r = $("#ripple");
+        r.style.left = `${e.clientX}px`;
+        r.style.top = `${e.clientY}px`;
+        r.classList.remove("go");
+        void r.offsetWidth;
+        r.classList.add("go");
+      });
+      $("#nav-settings").addEventListener("click", () => {
+        document.querySelectorAll(".nav").forEach((n) => n.classList.toggle("on", n.dataset.nav === "settings"));
+        $("#view-overview").hidden = true;
+        $("#view-settings").hidden = false;
+      });
+      $("#tab-billing").addEventListener("click", () => {
+        document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("on", t.dataset.tab === "billing"));
+        $("#tab-general").hidden = true;
+        $("#tab-billing-panel").hidden = false;
+      });
+      $("#save").addEventListener("click", () => $("#toast").classList.add("show"));
+    </script>
+  </body>
+</html>
