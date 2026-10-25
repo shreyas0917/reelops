@@ -126,6 +126,92 @@ moving on.
 > processing, and about $0.10/month when paused (step 8). Pause or destroy it
 > when you're done.
 
+### Before you start: set up your AWS account and a machine
+
+You need two things: an AWS account, and a Linux machine with the tools
+installed. The easiest machine is a small EC2 server in your own AWS
+account. That's what this project was built on.
+
+**1. Prepare your AWS account (once)**
+1. Create an AWS account and turn on **MFA** for the root user
+   (your account name, top right → **Security credentials** → **Assign MFA device**).
+   MFA means signing in also needs a code from your phone.
+2. Set a spending alert: **Billing and Cost Management → Budgets → Create
+   budget**, $5. AWS emails you before costs get high.
+3. In the top-right corner, choose the region **Asia Pacific (Mumbai)
+   ap-south-1**. Everything in this project runs there.
+4. Create a role for your machine: **IAM → Roles → Create role** →
+   trusted entity **AWS service → EC2** → policy **AdministratorAccess**
+   → name **reelops-devbox-role**.
+   A role gives the machine AWS permissions without any access keys.
+   AdministratorAccess is fine for your own practice account; never use
+   it at work.
+
+**2. Create the machine**
+**EC2 → Launch instance**, then choose:
+
+| Setting | Value |
+| --- | --- |
+| Name | reelops-devbox |
+| OS image | Ubuntu Server 24.04 |
+| Instance type | t3.medium (4 GB RAM, needed for Docker builds) |
+| Key pair | Create one and download the .pem file (your login key) |
+| Network | Allow SSH from **My IP** |
+| Storage | 30 GB |
+| Advanced details → IAM instance profile | reelops-devbox-role |
+
+Connect to it from your laptop's terminal (on Windows, PowerShell), using
+the machine's **Public IPv4 address** from the EC2 console:
+```bash
+chmod 400 reelops-devbox.pem      # macOS/Linux only: the key must be private
+ssh -i reelops-devbox.pem ubuntu@<public-ip>
+```
+Or use VS Code Remote-SSH with the same .pem file. (The **Connect → EC2
+Instance Connect** button in the browser won't work here: it connects from
+AWS's addresses, and SSH only allows your IP.)
+
+**3. Install the tools (copy and paste)**
+Run these on the machine. They were tested on a clean Ubuntu 24.04.
+```bash
+# Basic tools
+sudo apt-get update
+sudo apt-get install -y git python3 curl unzip ffmpeg ca-certificates gnupg
+
+# Docker (official install script), and permission to use it without sudo
+curl -fsSL https://get.docker.com | sudo sh
+sudo usermod -aG docker "$USER"
+
+# AWS CLI v2 (official installer)
+curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o awscliv2.zip
+unzip -q awscliv2.zip
+sudo ./aws/install
+rm -rf aws awscliv2.zip
+
+# Terraform (HashiCorp's package repository)
+curl -fsSL https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(. /etc/os-release && echo "$VERSION_CODENAME") main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
+sudo apt-get update
+sudo apt-get install -y terraform
+
+# Use the new Docker permission now (or log out and back in)
+newgrp docker
+```
+
+Check that everything works:
+```bash
+docker ps
+aws --version
+terraform version
+aws sts get-caller-identity
+```
+**You should see** no errors, and the last command shows your account
+number and `reelops-devbox-role`.
+
+> Using your own laptop instead? Linux and macOS work. On Windows, use
+> WSL2 (Ubuntu) with Docker Desktop. Also run
+> `export AWS_REGION=ap-south-1` (an EC2 machine in Mumbai knows its region;
+> a laptop doesn't). The EC2 machine above is the tested path.
+
 ### What you need
 
 | Tool | Why | Check it's installed |
@@ -136,6 +222,8 @@ moving on.
 | Docker 23+ (with BuildKit) | Builds the API and worker images | `docker ps` (no error) |
 | git, bash, python3, curl | Scripts | `git --version` |
 | ffmpeg (optional) | Only for the test video and test script in step 7 | `ffmpeg -version` |
+
+If you followed "Before you start", you already have all of these.
 
 **Sign the CLI in to AWS without access keys.** Use one of these:
 - **IAM Identity Center (SSO):** `aws configure sso`, then `aws sso login`
@@ -174,11 +262,16 @@ cp terraform/main/terraform.tfvars.example terraform/main/terraform.tfvars
 ```
 Open `terraform/main/terraform.tfvars` and fill in:
 ```hcl
-alert_email   = "you@example.com"     # where alarm emails go
-allowed_cidrs = ["203.0.113.10/32"]   # your public IP, with /32 on the end
+alert_email   = "you@example.com"                           # where alarm emails go
+allowed_cidrs = ["<your-home-ip>/32", "<your-ec2-ip>/32"]   # who may open the app
 ```
-- **Your public IP:** run `curl -s https://checkip.amazonaws.com`.
-- **Why the IP:** the app has no login, so only your IP can open it.
+- **Your home IP:** open https://checkip.amazonaws.com in your laptop's browser.
+- **Your EC2 machine's IP:** run `curl -s https://checkip.amazonaws.com` on it.
+- **Why both:** your browser opens the app from home, and the test script
+  (step 7) runs on the EC2 machine. The app has no login, so only these IPs
+  can open it.
+- **Both can change.** Your home IP can change any day, and the EC2 IP
+  changes every time you stop and start it.
 - `terraform.tfvars` is git-ignored, so your values never get committed.
 
 ### Step 4: Connect Terraform to the state bucket
@@ -250,6 +343,11 @@ Pausing removes the load balancer and running services and keeps your videos,
 images and settings, so the cost drops to about $0.10/month. While paused
 there is no app URL; resuming creates a new load balancer with a new one.
 
+Then stop your EC2 machine: **EC2 → Instances → reelops-devbox →
+Instance state → Stop**. A stopped machine costs almost nothing. Don't
+choose Terminate unless you're completely finished: it deletes the machine
+and everything on it.
+
 ### Step 9: Delete everything
 ```bash
 aws s3 rm "s3://$(terraform -chdir=terraform/main output -raw media_bucket_name)" --recursive
@@ -259,6 +357,11 @@ terraform -chdir=terraform/main destroy
   bucket that still has files in it.
 - The state bucket from step 2 is protected and kept. Delete it in the S3
   console if you're completely finished.
+
+Then stop your EC2 machine: **EC2 → Instances → reelops-devbox →
+Instance state → Stop**. A stopped machine costs almost nothing. Don't
+choose Terminate unless you're completely finished: it deletes the machine
+and everything on it.
 
 ### If something goes wrong
 
@@ -271,6 +374,8 @@ terraform -chdir=terraform/main destroy
 | The job sits on "Queued" | Normal for about 3 minutes while the first worker starts. |
 | No alarm emails | Confirm the subscription email from step 6 (check spam). |
 | `Error acquiring the state lock` | Another Terraform command is still running. Wait for it to finish. |
+| Workers never start (job stays "Waiting for a worker") | New AWS accounts can have a low Fargate limit. Open **Service Quotas → AWS Fargate → Fargate On-Demand vCPU resource count**. Each worker needs 2 vCPU; request at least 8 if it's lower. |
+| Can't connect to the EC2 machine (timeout) | Your home IP changed, or the machine was restarted. Update the SSH rule to **My IP**, and use the machine's new address. |
 
 ### Optional: CI/CD in your fork
 To run the GitHub Actions pipeline in your own fork:
