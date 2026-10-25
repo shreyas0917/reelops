@@ -11,7 +11,15 @@ GitHub Actions, and tested with failure drills against the live stack.
 
 ## Demo
 
-Demo video coming soon.
+[![ReelOps result page: a 1:37 narrated architecture walkthrough, captioned and re-voiced by ReelOps](docs/demo-output.png)](https://drive.google.com/file/d/1PyBVqyqM5OU3Vl-X_dI9V6aodf-QcjPB/view)
+
+▶ [Output video](https://drive.google.com/file/d/1PyBVqyqM5OU3Vl-X_dI9V6aodf-QcjPB/view): my narrated architecture walkthrough after ReelOps (captions + AI voice)<br>
+▶ [Screen recording](https://drive.google.com/file/d/19bUYDmQv8vKxHVwG3bW3zZKAovY4pwdh/view): uploading that walkthrough and watching it process
+
+- "Ready in 3 min 24 s" includes a cold start (workers scale from zero);
+  processing on a running worker is ~33 s.
+- Captions use Whisper's base model, which sometimes mishears AWS names
+  (e.g. DynamoDB); a domain word list for Whisper is a planned improvement.
 
 ## What it does
 
@@ -86,8 +94,9 @@ Found by the failure drills and by reviewing plans; details in
 | One API task | Replacing it gave a 20 s outage (drill 5) | Two API tasks across AZs |
 | Workers scale from 0 | Zero idle compute cost; the first job waits ~3 min | One warm worker in working hours |
 
-Next: authentication and HTTPS, per-user job lists, and alarms on the API's
-5xx rate and latency.
+Next: authentication and HTTPS, per-user job lists, alarms on the API's
+5xx rate and latency, and tuning the existing Whisper hotword hint with AWS
+terms.
 
 ## Cost
 
