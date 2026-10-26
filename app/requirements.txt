@@ -1,6 +1,6 @@
 # Runtime dependencies for the ReelOps API (python:3.12-slim).
 # Direct dependencies are pinned exactly; bump deliberately and rebuild.
 fastapi==0.143.0
-pydantic==2.14.0
+pydantic==2.14.1
 uvicorn==0.54.0
 boto3==1.43.111
