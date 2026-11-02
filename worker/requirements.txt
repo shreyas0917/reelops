@@ -1,7 +1,7 @@
 # Runtime dependencies for the ReelOps worker (python:3.12-slim).
 # Direct dependencies are pinned exactly; bump deliberately and rebuild.
 faster-whisper==1.2.1
-boto3==1.43.111
+boto3==1.43.114
 
 # Transitive pins (dependencies of the above, pinned to avoid known breakage).
 # av: faster-whisper 1.2.1 requires av>=11 with no upper bound, but PyAV 19.0
