@@ -7,7 +7,7 @@
 #   docker build -f app/Dockerfile -t reelops-api:test --target test .
 
 # ---- frontend: build the UI; only dist/ reaches the final image -------------
-FROM node:24.22.1-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205 AS frontend
+FROM node:24.22.1-slim@sha256:be8204d4bd327363357f532187b752ff62759c31bedf98e9e18fc08c9cbd605c AS frontend
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 WORKDIR /fe
 # Dependencies before sources: reused until the lock file changes.
